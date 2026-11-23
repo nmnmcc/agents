@@ -13,6 +13,10 @@ concurrency:
 
 permissions: {}
 
+env:
+  # Incremental artifacts only bloat the Cargo cache on fresh CI checkouts.
+  CARGO_INCREMENTAL: "0"
+
 jobs:
   # Builds the release package. The build also runs `cargo test` and the
   # install check from devenv.nix.
@@ -47,6 +51,16 @@ jobs:
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup
+      - name: Cache Cargo
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ hashFiles('rust-toolchain.toml', 'devenv.lock', 'Cargo.lock') }}-${{ github.sha }}
+          restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ hashFiles('rust-toolchain.toml', 'devenv.lock', 'Cargo.lock') }}-
       - run: devenv test
 
   lint:
@@ -60,6 +74,16 @@ jobs:
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup
+      - name: Cache Cargo
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ hashFiles('rust-toolchain.toml', 'devenv.lock', 'Cargo.lock') }}-${{ github.sha }}
+          restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ hashFiles('rust-toolchain.toml', 'devenv.lock', 'Cargo.lock') }}-
       - name: Check formatting
         run: devenv shell -- treefmt --ci
       - name: Clippy
