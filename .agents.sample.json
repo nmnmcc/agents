@@ -1,0 +1,54 @@
+{
+  "$schema": "./agents.schema.json",
+  "version": 1,
+  "agent": "reviewer",
+  "instructions": "Keep changes small and testable. Report what you verified and what remains uncertain.",
+  "agents": {
+    "default": {
+      "harness": "claude",
+      "mcp": []
+    },
+    "reviewer": {
+      "model": "sonnet",
+      "description": "Review a change for correctness and missing tests",
+      "instructions": "Report findings with file and line references. Do not edit the project.",
+      "mcp": ["*", "!experimental-*"],
+      "mail": {
+        "address": "agents+reviewer@example.test",
+        "from": ["builder"],
+        "to": ["builder"]
+      }
+    },
+    "builder": {
+      "harness": "codex",
+      "description": "Implement and test a requested change",
+      "instructions": "Make the smallest change that solves the task and run the relevant checks.",
+      "mail": {
+        "from": ["reviewer"],
+        "to": ["reviewer"]
+      }
+    }
+  },
+  "mcp": {
+    "docs": {
+      "type": "http",
+      "url": "https://mcp.example.test/mcp"
+    },
+    "experimental-docs": { "disable": true }
+  },
+  "mail": {
+    "address": "{{ agent.id }}@example.test",
+    "trust": ["maintainer@example.test"],
+    "cc": ["maintainer@example.test"],
+    "bcc": ["audit@example.test"],
+    "transport": {
+      "smtp": {
+        "endpoint": { "host": "smtp.example.test", "port": 465 },
+        "login": {
+          "username": "agents",
+          "password": { "env": "AGENTS_SMTP_PASSWORD" }
+        }
+      }
+    }
+  }
+}

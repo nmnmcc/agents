@@ -1,0 +1,12 @@
+{
+  "$schema": "../../agents.schema.json",
+  "version": 1,
+  "agent": "reviewer",
+  "agents": {
+    "reviewer": {
+      "harness": "claude",
+      "description": "Review a change for correctness and missing tests",
+      "instructions": "Review the requested change for correctness and missing tests. Report findings with file and line references when available. Do not edit the project."
+    }
+  }
+}

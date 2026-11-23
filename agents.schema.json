@@ -1,0 +1,2316 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "agents configuration",
+  "allOf": [
+    {
+      "$ref": "#/$defs/ProjectFragment"
+    }
+  ],
+  "$defs": {
+    "AgentMail": {
+      "type": "object",
+      "properties": {
+        "address": {
+          "anyOf": [
+            {
+              "description": "Address or MiniJinja template overriding the project default.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            {
+              "$ref": "#/$defs/EnvReference"
+            },
+            {
+              "$ref": "#/$defs/FileReference"
+            }
+          ]
+        },
+        "from": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/$defs/AgentSelector"
+          }
+        },
+        "to": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/$defs/AgentSelector"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "AgentSelector": {
+      "anyOf": [
+        {
+          "description": "An agent ID in this project, or a workspace-relative path:agent selector.",
+          "type": "string",
+          "pattern": "^(?:[^\\\\\\u0000]+:)?[a-z0-9_-]+$(?![\\s\\S])"
+        },
+        {
+          "$ref": "#/$defs/EnvReference"
+        },
+        {
+          "$ref": "#/$defs/FileReference"
+        }
+      ]
+    },
+    "Arg": {
+      "anyOf": [
+        {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "$ref": "#/$defs/EnvReference"
+            },
+            {
+              "$ref": "#/$defs/FileReference"
+            }
+          ]
+        },
+        {
+          "$ref": "#/$defs/ArgTemplate"
+        },
+        {
+          "$ref": "#/$defs/ArgGroup"
+        }
+      ]
+    },
+    "ArgGroup": {
+      "type": "object",
+      "properties": {
+        "args": {
+          "description": "Arguments emitted at this position when the condition is true.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Arg"
+          }
+        },
+        "when": {
+          "anyOf": [
+            {
+              "description": "MiniJinja expression that must evaluate to a boolean.",
+              "type": "string"
+            },
+            {
+              "$ref": "#/$defs/EnvReference"
+            },
+            {
+              "$ref": "#/$defs/FileReference"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "when",
+        "args"
+      ]
+    },
+    "ArgTemplate": {
+      "type": "object",
+      "properties": {
+        "template": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "$ref": "#/$defs/EnvReference"
+            },
+            {
+              "$ref": "#/$defs/FileReference"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "template"
+      ]
+    },
+    "Artifact": {
+      "type": "object",
+      "properties": {
+        "format": {
+          "$ref": "#/$defs/Format"
+        },
+        "template": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "$ref": "#/$defs/EnvReference"
+            },
+            {
+              "$ref": "#/$defs/FileReference"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "template",
+        "format"
+      ]
+    },
+    "Capabilities": {
+      "type": "object",
+      "properties": {
+        "mcp": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Transport"
+          }
+        },
+        "sessions": {
+          "description": "Can create and resume a persistent native session using the supplied session ID.",
+          "type": "boolean",
+          "default": false
+        },
+        "skills": {
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "Endpoint": {
+      "type": "object",
+      "properties": {
+        "host": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "$ref": "#/$defs/EnvReference"
+            },
+            {
+              "$ref": "#/$defs/FileReference"
+            }
+          ]
+        },
+        "port": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "security": {
+          "$ref": "#/$defs/Security"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "host",
+        "port"
+      ]
+    },
+    "EnvName": {
+      "type": "string",
+      "pattern": "^[A-Za-z_][A-Za-z0-9_]*$(?![\\s\\S])"
+    },
+    "EnvReference": {
+      "type": "object",
+      "properties": {
+        "env": {
+          "$ref": "#/$defs/EnvName"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "env"
+      ]
+    },
+    "FileReference": {
+      "type": "object",
+      "properties": {
+        "file": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "file"
+      ]
+    },
+    "Format": {
+      "anyOf": [
+        {
+          "type": "string",
+          "enum": [
+            "text",
+            "json"
+          ]
+        },
+        {
+          "$ref": "#/$defs/EnvReference"
+        },
+        {
+          "$ref": "#/$defs/FileReference"
+        }
+      ]
+    },
+    "GetAttachment": {
+      "type": "object",
+      "properties": {
+        "index": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "mail": {
+          "$ref": "#/$defs/MailRef"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "mail",
+        "index"
+      ]
+    },
+    "Harness": {
+      "type": "object",
+      "properties": {
+        "$schema": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "args": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Arg"
+          }
+        },
+        "capabilities": {
+          "$ref": "#/$defs/Capabilities"
+        },
+        "env": {
+          "description": "Child-only environment overrides; null removes an inherited value.",
+          "type": "object",
+          "additionalProperties": false,
+          "default": {},
+          "patternProperties": {
+            "^[A-Za-z_][A-Za-z0-9_]*$(?![\\s\\S])": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        },
+        "files": {
+          "type": "object",
+          "additionalProperties": false,
+          "patternProperties": {
+            "^(?:[^./\\\\\\u0000][^/\\\\\\u0000]*|\\.[^./\\\\\\u0000][^/\\\\\\u0000]*|\\.\\.[^/\\\\\\u0000]+)$(?![\\s\\S])": {
+              "$ref": "#/$defs/Artifact"
+            }
+          }
+        },
+        "program": {
+          "$ref": "#/$defs/Program"
+        },
+        "session_id_event": {
+          "description": "Read a native session ID from a JSONL event on stdout when starting a mail session.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SessionIdEvent"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "session_resume_check": {
+          "description": "Arguments for a command that must succeed before resuming a mail session.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/$defs/Arg"
+          }
+        },
+        "stdin": {
+          "anyOf": [
+            {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            {
+              "$ref": "#/$defs/EnvReference"
+            },
+            {
+              "$ref": "#/$defs/FileReference"
+            }
+          ]
+        },
+        "version": {
+          "$ref": "#/$defs/Version"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "program",
+        "args"
+      ]
+    },
+    "Id": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^[a-z0-9_-]+$(?![\\s\\S])"
+        },
+        {
+          "$ref": "#/$defs/EnvReference"
+        },
+        {
+          "$ref": "#/$defs/FileReference"
+        }
+      ]
+    },
+    "Incoming": {
+      "type": "object",
+      "properties": {
+        "endpoint": {
+          "$ref": "#/$defs/Endpoint"
+        },
+        "login": {
+          "$ref": "#/$defs/Login"
+        },
+        "mailbox": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "$ref": "#/$defs/EnvReference"
+            },
+            {
+              "$ref": "#/$defs/FileReference"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "endpoint",
+        "login",
+        "mailbox"
+      ]
+    },
+    "InlineAgent": {
+      "type": "object",
+      "properties": {
+        "description": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "$ref": "#/$defs/EnvReference"
+            },
+            {
+              "$ref": "#/$defs/FileReference"
+            }
+          ]
+        },
+        "harness": {
+          "$ref": "#/$defs/Id"
+        },
+        "instructions": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "$ref": "#/$defs/EnvReference"
+            },
+            {
+              "$ref": "#/$defs/FileReference"
+            }
+          ]
+        },
+        "mail": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AgentMail"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "mcp": {
+          "description": "Ordered MCP selection patterns: select on a match, exclude with `!`.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "$ref": "#/$defs/EnvReference"
+              },
+              {
+                "$ref": "#/$defs/FileReference"
+              }
+            ]
+          }
+        },
+        "model": {
+          "anyOf": [
+            {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            {
+              "$ref": "#/$defs/EnvReference"
+            },
+            {
+              "$ref": "#/$defs/FileReference"
+            }
+          ]
+        },
+        "skills": {
+          "description": "Skills to expose to this agent. Omit to discover project skills; [] disables them.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "default": null,
+          "items": {
+            "$ref": "#/$defs/Id"
+          },
+          "uniqueItems": true
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "harness",
+        "description",
+        "instructions"
+      ]
+    },
+    "LegacyLogin": {
+      "type": "object",
+      "properties": {
+        "password_env": {
+          "$ref": "#/$defs/EnvName"
+        },
+        "username": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "$ref": "#/$defs/EnvReference"
+            },
+            {
+              "$ref": "#/$defs/FileReference"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "username",
+        "password_env"
+      ]
+    },
+    "ListMail": {
+      "type": "object",
+      "properties": {
+        "before_uid": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "limit": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0
+        },
+        "unread_only": {
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "Login": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SourceLogin"
+        },
+        {
+          "$ref": "#/$defs/LegacyLogin"
+        }
+      ]
+    },
+    "MailAddress": {
+      "anyOf": [
+        {
+          "type": "string",
+          "format": "email"
+        },
+        {
+          "$ref": "#/$defs/EnvReference"
+        },
+        {
+          "$ref": "#/$defs/FileReference"
+        }
+      ]
+    },
+    "MailConfig": {
+      "type": "object",
+      "properties": {
+        "imap": {
+          "description": "Dedicated mailbox written only by a gateway that replaces the envelope recipient stamp.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Incoming"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "outbox": {
+          "anyOf": [
+            {
+              "description": "An IMAP outbox folder, defaulting to AgentOutbox when IMAP is configured.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            {
+              "$ref": "#/$defs/EnvReference"
+            },
+            {
+              "$ref": "#/$defs/FileReference"
+            }
+          ]
+        },
+        "retry": {
+          "$ref": "#/$defs/Policy"
+        },
+        "smtp": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Outgoing"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "MailRef": {
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "uid_validity": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "uid_validity",
+        "uid"
+      ]
+    },
+    "Mcp": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "args": {
+              "type": "array",
+              "default": [],
+              "items": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "$ref": "#/$defs/EnvReference"
+                  },
+                  {
+                    "$ref": "#/$defs/FileReference"
+                  }
+                ]
+              }
+            },
+            "command": {
+              "$ref": "#/$defs/Program"
+            },
+            "disable": {
+              "type": "boolean",
+              "writeOnly": true
+            },
+            "env": {
+              "type": "object",
+              "additionalProperties": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "$ref": "#/$defs/EnvReference"
+                  },
+                  {
+                    "$ref": "#/$defs/FileReference"
+                  }
+                ]
+              },
+              "default": {}
+            },
+            "type": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "const": "stdio"
+                },
+                {
+                  "$ref": "#/$defs/EnvReference"
+                },
+                {
+                  "$ref": "#/$defs/FileReference"
+                }
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "command"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "disable": {
+              "type": "boolean",
+              "writeOnly": true
+            },
+            "type": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "const": "http"
+                },
+                {
+                  "$ref": "#/$defs/EnvReference"
+                },
+                {
+                  "$ref": "#/$defs/FileReference"
+                }
+              ]
+            },
+            "url": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "$ref": "#/$defs/EnvReference"
+                },
+                {
+                  "$ref": "#/$defs/FileReference"
+                }
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "url"
+          ]
+        }
+      ]
+    },
+    "McpDefinition": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "disable": {
+              "type": "boolean",
+              "const": true
+            }
+          },
+          "required": [
+            "disable"
+          ]
+        },
+        {
+          "$ref": "#/$defs/Mcp"
+        }
+      ]
+    },
+    "Outgoing": {
+      "type": "object",
+      "properties": {
+        "endpoint": {
+          "$ref": "#/$defs/Endpoint"
+        },
+        "login": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Login"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "endpoint"
+      ]
+    },
+    "Policy": {
+      "type": "object",
+      "properties": {
+        "maximal_backoff_time": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 4000,
+          "minimum": 1
+        },
+        "maximal_queue_lifetime": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 432000,
+          "minimum": 0
+        },
+        "minimal_backoff_time": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 300,
+          "minimum": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "Program": {
+      "anyOf": [
+        {
+          "description": "An absolute executable path or a bare executable name resolved via PATH.",
+          "type": "string",
+          "minLength": 1,
+          "not": {
+            "pattern": "\\u0000"
+          }
+        },
+        {
+          "$ref": "#/$defs/EnvReference"
+        },
+        {
+          "$ref": "#/$defs/FileReference"
+        }
+      ]
+    },
+    "ProjectConfig": {
+      "type": "object",
+      "properties": {
+        "$schema": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "agent": {
+          "description": "Agent to use unless one is explicitly selected.",
+          "$ref": "#/$defs/Id"
+        },
+        "agents": {
+          "description": "Agent definitions keyed by name.",
+          "type": "object",
+          "else": {
+            "additionalProperties": false,
+            "patternProperties": {
+              "^[a-z0-9_-]+$(?![\\s\\S])": {
+                "$ref": "#/$defs/InlineAgent"
+              }
+            }
+          },
+          "if": {
+            "required": [
+              "default"
+            ]
+          },
+          "then": {
+            "$ref": "#/$defs/ProjectFragment/properties/agents"
+          }
+        },
+        "harnesses": {
+          "description": "Harness adapters available to this project.",
+          "type": "object",
+          "else": {
+            "additionalProperties": false,
+            "patternProperties": {
+              "^[a-z0-9_-]+$(?![\\s\\S])": {
+                "$ref": "#/$defs/Harness"
+              }
+            }
+          },
+          "if": {
+            "required": [
+              "default"
+            ]
+          },
+          "then": {
+            "$ref": "#/$defs/ProjectFragment/properties/harnesses"
+          }
+        },
+        "instructions": {
+          "anyOf": [
+            {
+              "description": "Project instructions. Defaults to the contents of AGENTS.md if present.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            {
+              "$ref": "#/$defs/EnvReference"
+            },
+            {
+              "$ref": "#/$defs/FileReference"
+            }
+          ]
+        },
+        "mail": {
+          "$ref": "#/$defs/ProjectMail"
+        },
+        "mcp": {
+          "description": "MCP server definitions available to this project.",
+          "type": "object",
+          "else": {
+            "additionalProperties": false,
+            "patternProperties": {
+              "^[a-z0-9_-]+$(?![\\s\\S])": {
+                "$ref": "#/$defs/McpDefinition"
+              }
+            }
+          },
+          "if": {
+            "required": [
+              "default"
+            ]
+          },
+          "then": {
+            "$ref": "#/$defs/ProjectFragment/properties/mcp"
+          }
+        },
+        "skills": {
+          "description": "Override skill entrypoint paths relative to the project root.",
+          "type": "object",
+          "additionalProperties": false,
+          "default": {},
+          "patternProperties": {
+            "^[a-z0-9_-]+$(?![\\s\\S])": {
+              "$ref": "#/$defs/RelativePath"
+            }
+          }
+        },
+        "version": {
+          "$ref": "#/$defs/Version"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "agent",
+        "agents"
+      ]
+    },
+    "ProjectFragment": {
+      "title": "ProjectConfigFragment",
+      "type": "object",
+      "properties": {
+        "$schema": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "agent": {
+          "anyOf": [
+            {
+              "description": "Agent to use unless one is explicitly selected.",
+              "type": "string",
+              "pattern": "^[a-z0-9_-]+$(?![\\s\\S])"
+            },
+            {
+              "$ref": "#/$defs/EnvReference"
+            },
+            {
+              "$ref": "#/$defs/FileReference"
+            }
+          ]
+        },
+        "agents": {
+          "description": "Agent definitions keyed by name.",
+          "type": "object",
+          "additionalProperties": false,
+          "patternProperties": {
+            "^[a-z0-9_-]+$(?![\\s\\S])": {
+              "type": "object",
+              "properties": {
+                "description": {
+                  "type": "string"
+                },
+                "harness": {
+                  "type": "string",
+                  "pattern": "^[a-z0-9_-]+$(?![\\s\\S])"
+                },
+                "instructions": {
+                  "type": "string"
+                },
+                "mail": {
+                  "type": [
+                    "object",
+                    "null"
+                  ],
+                  "properties": {
+                    "address": {
+                      "description": "Address or MiniJinja template overriding the project default.",
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "from": {
+                      "type": [
+                        "array",
+                        "null"
+                      ],
+                      "items": {
+                        "description": "An agent ID in this project, or a workspace-relative path:agent selector.",
+                        "type": "string",
+                        "pattern": "^(?:[^\\\\\\u0000]+:)?[a-z0-9_-]+$(?![\\s\\S])"
+                      }
+                    },
+                    "to": {
+                      "type": [
+                        "array",
+                        "null"
+                      ],
+                      "items": {
+                        "description": "An agent ID in this project, or a workspace-relative path:agent selector.",
+                        "type": "string",
+                        "pattern": "^(?:[^\\\\\\u0000]+:)?[a-z0-9_-]+$(?![\\s\\S])"
+                      }
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "mcp": {
+                  "description": "Ordered MCP selection patterns: select on a match, exclude with `!`.",
+                  "type": "array",
+                  "default": [],
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "model": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "skills": {
+                  "description": "Skills to expose to this agent. Omit to discover project skills; [] disables them.",
+                  "type": [
+                    "array",
+                    "null"
+                  ],
+                  "default": null,
+                  "items": {
+                    "type": "string",
+                    "pattern": "^[a-z0-9_-]+$(?![\\s\\S])"
+                  },
+                  "uniqueItems": true
+                }
+              },
+              "additionalProperties": false
+            }
+          }
+        },
+        "harnesses": {
+          "description": "Harness adapters available to this project.",
+          "type": "object",
+          "additionalProperties": false,
+          "patternProperties": {
+            "^[a-z0-9_-]+$(?![\\s\\S])": {
+              "type": "object",
+              "properties": {
+                "$schema": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "args": {
+                  "type": "array",
+                  "items": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "template": {
+                            "type": "string"
+                          }
+                        },
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "args": {
+                            "description": "Arguments emitted at this position when the condition is true.",
+                            "type": "array",
+                            "items": {
+                              "$ref": "#/$defs/Arg"
+                            }
+                          },
+                          "when": {
+                            "description": "MiniJinja expression that must evaluate to a boolean.",
+                            "type": "string"
+                          }
+                        },
+                        "additionalProperties": false
+                      }
+                    ]
+                  }
+                },
+                "capabilities": {
+                  "type": "object",
+                  "properties": {
+                    "mcp": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "enum": [
+                          "stdio",
+                          "http"
+                        ]
+                      }
+                    },
+                    "sessions": {
+                      "description": "Can create and resume a persistent native session using the supplied session ID.",
+                      "type": "boolean",
+                      "default": false
+                    },
+                    "skills": {
+                      "type": "boolean",
+                      "default": false
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "env": {
+                  "description": "Child-only environment overrides; null removes an inherited value.",
+                  "type": "object",
+                  "additionalProperties": false,
+                  "default": {},
+                  "patternProperties": {
+                    "^[A-Za-z_][A-Za-z0-9_]*$(?![\\s\\S])": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    }
+                  }
+                },
+                "files": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "patternProperties": {
+                    "^(?:[^./\\\\\\u0000][^/\\\\\\u0000]*|\\.[^./\\\\\\u0000][^/\\\\\\u0000]*|\\.\\.[^/\\\\\\u0000]+)$(?![\\s\\S])": {
+                      "type": "object",
+                      "properties": {
+                        "format": {
+                          "type": "string",
+                          "enum": [
+                            "text",
+                            "json"
+                          ]
+                        },
+                        "template": {
+                          "type": "string"
+                        }
+                      },
+                      "additionalProperties": false
+                    }
+                  }
+                },
+                "program": {
+                  "description": "An absolute executable path or a bare executable name resolved via PATH.",
+                  "type": "string",
+                  "minLength": 1,
+                  "not": {
+                    "pattern": "\\u0000"
+                  }
+                },
+                "session_id_event": {
+                  "description": "Read a native session ID from a JSONL event on stdout when starting a mail session.",
+                  "type": [
+                    "object",
+                    "null"
+                  ],
+                  "properties": {
+                    "event": {
+                      "description": "Expected value of the JSON event's `type` field.",
+                      "type": "string"
+                    },
+                    "field": {
+                      "description": "JSON field containing the native session ID.",
+                      "type": "string"
+                    },
+                    "uuid": {
+                      "description": "Require a UUID rather than accepting an arbitrary identifier.",
+                      "type": "boolean",
+                      "default": false
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "session_resume_check": {
+                  "description": "Arguments for a command that must succeed before resuming a mail session.",
+                  "type": [
+                    "array",
+                    "null"
+                  ],
+                  "items": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "template": {
+                            "type": "string"
+                          }
+                        },
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "args": {
+                            "description": "Arguments emitted at this position when the condition is true.",
+                            "type": "array",
+                            "items": {
+                              "$ref": "#/$defs/Arg"
+                            }
+                          },
+                          "when": {
+                            "description": "MiniJinja expression that must evaluate to a boolean.",
+                            "type": "string"
+                          }
+                        },
+                        "additionalProperties": false
+                      }
+                    ]
+                  }
+                },
+                "stdin": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "version": {
+                  "type": "integer",
+                  "const": 1
+                }
+              },
+              "additionalProperties": false
+            }
+          }
+        },
+        "instructions": {
+          "anyOf": [
+            {
+              "description": "Project instructions. Defaults to the contents of AGENTS.md if present.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            {
+              "$ref": "#/$defs/EnvReference"
+            },
+            {
+              "$ref": "#/$defs/FileReference"
+            }
+          ]
+        },
+        "mail": {
+          "type": "object",
+          "properties": {
+            "address": {
+              "anyOf": [
+                {
+                  "description": "Default address template for agents in this project.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                {
+                  "$ref": "#/$defs/EnvReference"
+                },
+                {
+                  "$ref": "#/$defs/FileReference"
+                }
+              ]
+            },
+            "bcc": {
+              "description": "Monitoring recipients blind-copied on all outgoing mail.",
+              "type": "array",
+              "default": [],
+              "items": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "format": "email"
+                  },
+                  {
+                    "$ref": "#/$defs/EnvReference"
+                  },
+                  {
+                    "$ref": "#/$defs/FileReference"
+                  }
+                ]
+              }
+            },
+            "cc": {
+              "description": "Monitoring recipients copied on all outgoing mail.",
+              "type": "array",
+              "default": [],
+              "items": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "format": "email"
+                  },
+                  {
+                    "$ref": "#/$defs/EnvReference"
+                  },
+                  {
+                    "$ref": "#/$defs/FileReference"
+                  }
+                ]
+              }
+            },
+            "directory": {
+              "anyOf": [
+                {
+                  "description": "Where local mbox files are stored, relative to the project.",
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "not": {
+                    "pattern": "(^|/)\\.{1,2}(/|$)"
+                  },
+                  "pattern": "^[^/\\\\\\u0000]+(?:/[^/\\\\\\u0000]+)*$(?![\\s\\S])"
+                },
+                {
+                  "$ref": "#/$defs/EnvReference"
+                },
+                {
+                  "$ref": "#/$defs/FileReference"
+                }
+              ]
+            },
+            "from": {
+              "description": "Limit incoming mail from registered agents. Omission allows all agents.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "anyOf": [
+                  {
+                    "description": "An agent ID in this project, or a workspace-relative path:agent selector.",
+                    "type": "string",
+                    "pattern": "^(?:[^\\\\\\u0000]+:)?[a-z0-9_-]+$(?![\\s\\S])"
+                  },
+                  {
+                    "$ref": "#/$defs/EnvReference"
+                  },
+                  {
+                    "$ref": "#/$defs/FileReference"
+                  }
+                ]
+              }
+            },
+            "to": {
+              "description": "Limit outgoing mail to registered agents. Omission allows all agents.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "anyOf": [
+                  {
+                    "description": "An agent ID in this project, or a workspace-relative path:agent selector.",
+                    "type": "string",
+                    "pattern": "^(?:[^\\\\\\u0000]+:)?[a-z0-9_-]+$(?![\\s\\S])"
+                  },
+                  {
+                    "$ref": "#/$defs/EnvReference"
+                  },
+                  {
+                    "$ref": "#/$defs/FileReference"
+                  }
+                ]
+              }
+            },
+            "transport": {
+              "type": "object",
+              "properties": {
+                "imap": {
+                  "description": "Dedicated mailbox written only by a gateway that replaces the envelope recipient stamp.",
+                  "type": [
+                    "object",
+                    "null"
+                  ],
+                  "properties": {
+                    "endpoint": {
+                      "type": "object",
+                      "properties": {
+                        "host": {
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "$ref": "#/$defs/EnvReference"
+                            },
+                            {
+                              "$ref": "#/$defs/FileReference"
+                            }
+                          ]
+                        },
+                        "port": {
+                          "type": "integer",
+                          "format": "uint16",
+                          "maximum": 65535,
+                          "minimum": 0
+                        },
+                        "security": {
+                          "anyOf": [
+                            {
+                              "anyOf": [
+                                {
+                                  "type": "string",
+                                  "enum": [
+                                    "tls"
+                                  ]
+                                },
+                                {
+                                  "$ref": "#/$defs/EnvReference"
+                                },
+                                {
+                                  "$ref": "#/$defs/FileReference"
+                                }
+                              ]
+                            },
+                            {
+                              "anyOf": [
+                                {
+                                  "description": "Test/local delivery only; requires a literal loopback address.",
+                                  "type": "string",
+                                  "const": "loopback"
+                                },
+                                {
+                                  "$ref": "#/$defs/EnvReference"
+                                },
+                                {
+                                  "$ref": "#/$defs/FileReference"
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      },
+                      "additionalProperties": false
+                    },
+                    "login": {
+                      "anyOf": [
+                        {
+                          "type": "object",
+                          "properties": {
+                            "password": {
+                              "anyOf": [
+                                {
+                                  "type": "string"
+                                },
+                                {
+                                  "type": "object",
+                                  "properties": {
+                                    "env": {
+                                      "type": "string",
+                                      "pattern": "^[A-Za-z_][A-Za-z0-9_]*$(?![\\s\\S])"
+                                    }
+                                  },
+                                  "additionalProperties": false
+                                },
+                                {
+                                  "type": "object",
+                                  "properties": {
+                                    "file": {
+                                      "type": "string"
+                                    }
+                                  },
+                                  "additionalProperties": false
+                                }
+                              ]
+                            },
+                            "username": {
+                              "anyOf": [
+                                {
+                                  "type": "string"
+                                },
+                                {
+                                  "$ref": "#/$defs/EnvReference"
+                                },
+                                {
+                                  "$ref": "#/$defs/FileReference"
+                                }
+                              ]
+                            }
+                          },
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "object",
+                          "properties": {
+                            "password_env": {
+                              "type": "string",
+                              "pattern": "^[A-Za-z_][A-Za-z0-9_]*$(?![\\s\\S])"
+                            },
+                            "username": {
+                              "anyOf": [
+                                {
+                                  "type": "string"
+                                },
+                                {
+                                  "$ref": "#/$defs/EnvReference"
+                                },
+                                {
+                                  "$ref": "#/$defs/FileReference"
+                                }
+                              ]
+                            }
+                          },
+                          "additionalProperties": false
+                        }
+                      ]
+                    },
+                    "mailbox": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "$ref": "#/$defs/EnvReference"
+                        },
+                        {
+                          "$ref": "#/$defs/FileReference"
+                        }
+                      ]
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "outbox": {
+                  "anyOf": [
+                    {
+                      "description": "An IMAP outbox folder, defaulting to AgentOutbox when IMAP is configured.",
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    {
+                      "$ref": "#/$defs/EnvReference"
+                    },
+                    {
+                      "$ref": "#/$defs/FileReference"
+                    }
+                  ]
+                },
+                "retry": {
+                  "type": "object",
+                  "properties": {
+                    "maximal_backoff_time": {
+                      "type": "integer",
+                      "format": "uint64",
+                      "default": 4000,
+                      "minimum": 1
+                    },
+                    "maximal_queue_lifetime": {
+                      "type": "integer",
+                      "format": "uint64",
+                      "default": 432000,
+                      "minimum": 0
+                    },
+                    "minimal_backoff_time": {
+                      "type": "integer",
+                      "format": "uint64",
+                      "default": 300,
+                      "minimum": 1
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "smtp": {
+                  "type": [
+                    "object",
+                    "null"
+                  ],
+                  "properties": {
+                    "endpoint": {
+                      "type": "object",
+                      "properties": {
+                        "host": {
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "$ref": "#/$defs/EnvReference"
+                            },
+                            {
+                              "$ref": "#/$defs/FileReference"
+                            }
+                          ]
+                        },
+                        "port": {
+                          "type": "integer",
+                          "format": "uint16",
+                          "maximum": 65535,
+                          "minimum": 0
+                        },
+                        "security": {
+                          "anyOf": [
+                            {
+                              "anyOf": [
+                                {
+                                  "type": "string",
+                                  "enum": [
+                                    "tls"
+                                  ]
+                                },
+                                {
+                                  "$ref": "#/$defs/EnvReference"
+                                },
+                                {
+                                  "$ref": "#/$defs/FileReference"
+                                }
+                              ]
+                            },
+                            {
+                              "anyOf": [
+                                {
+                                  "description": "Test/local delivery only; requires a literal loopback address.",
+                                  "type": "string",
+                                  "const": "loopback"
+                                },
+                                {
+                                  "$ref": "#/$defs/EnvReference"
+                                },
+                                {
+                                  "$ref": "#/$defs/FileReference"
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      },
+                      "additionalProperties": false
+                    },
+                    "login": {
+                      "anyOf": [
+                        {
+                          "anyOf": [
+                            {
+                              "type": "object",
+                              "properties": {
+                                "password": {
+                                  "anyOf": [
+                                    {
+                                      "type": "string"
+                                    },
+                                    {
+                                      "type": "object",
+                                      "properties": {
+                                        "env": {
+                                          "type": "string",
+                                          "pattern": "^[A-Za-z_][A-Za-z0-9_]*$(?![\\s\\S])"
+                                        }
+                                      },
+                                      "additionalProperties": false
+                                    },
+                                    {
+                                      "type": "object",
+                                      "properties": {
+                                        "file": {
+                                          "type": "string"
+                                        }
+                                      },
+                                      "additionalProperties": false
+                                    }
+                                  ]
+                                },
+                                "username": {
+                                  "anyOf": [
+                                    {
+                                      "type": "string"
+                                    },
+                                    {
+                                      "$ref": "#/$defs/EnvReference"
+                                    },
+                                    {
+                                      "$ref": "#/$defs/FileReference"
+                                    }
+                                  ]
+                                }
+                              },
+                              "additionalProperties": false
+                            },
+                            {
+                              "type": "object",
+                              "properties": {
+                                "password_env": {
+                                  "type": "string",
+                                  "pattern": "^[A-Za-z_][A-Za-z0-9_]*$(?![\\s\\S])"
+                                },
+                                "username": {
+                                  "anyOf": [
+                                    {
+                                      "type": "string"
+                                    },
+                                    {
+                                      "$ref": "#/$defs/EnvReference"
+                                    },
+                                    {
+                                      "$ref": "#/$defs/FileReference"
+                                    }
+                                  ]
+                                }
+                              },
+                              "additionalProperties": false
+                            }
+                          ]
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              },
+              "additionalProperties": false
+            },
+            "trust": {
+              "description": "Human mailboxes trusted as authenticated senders and reply recipients.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "format": "email"
+                  },
+                  {
+                    "$ref": "#/$defs/EnvReference"
+                  },
+                  {
+                    "$ref": "#/$defs/FileReference"
+                  }
+                ]
+              }
+            },
+            "workspace": {
+              "anyOf": [
+                {
+                  "description": "Optional root for discovering mail identities, relative to this project.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                {
+                  "$ref": "#/$defs/EnvReference"
+                },
+                {
+                  "$ref": "#/$defs/FileReference"
+                }
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        "mcp": {
+          "description": "MCP server definitions available to this project.",
+          "type": "object",
+          "additionalProperties": false,
+          "patternProperties": {
+            "^[a-z0-9_-]+$(?![\\s\\S])": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "disable": {
+                      "type": "boolean",
+                      "const": true
+                    }
+                  }
+                },
+                {
+                  "anyOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "args": {
+                          "type": "array",
+                          "default": [],
+                          "items": {
+                            "type": "string"
+                          }
+                        },
+                        "command": {
+                          "description": "An absolute executable path or a bare executable name resolved via PATH.",
+                          "type": "string",
+                          "minLength": 1,
+                          "not": {
+                            "pattern": "\\u0000"
+                          }
+                        },
+                        "disable": {
+                          "type": "boolean",
+                          "writeOnly": true
+                        },
+                        "env": {
+                          "type": "object",
+                          "additionalProperties": {
+                            "type": "string"
+                          },
+                          "default": {}
+                        },
+                        "type": {
+                          "type": "string",
+                          "const": "stdio"
+                        }
+                      },
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "disable": {
+                          "type": "boolean",
+                          "writeOnly": true
+                        },
+                        "type": {
+                          "type": "string",
+                          "const": "http"
+                        },
+                        "url": {
+                          "type": "string"
+                        }
+                      },
+                      "additionalProperties": false
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        },
+        "skills": {
+          "description": "Override skill entrypoint paths relative to the project root.",
+          "type": "object",
+          "additionalProperties": false,
+          "default": {},
+          "patternProperties": {
+            "^[a-z0-9_-]+$(?![\\s\\S])": {
+              "description": "A slash-separated relative file path, resolved beneath its owning directory.",
+              "type": "string",
+              "not": {
+                "pattern": "(^|/)\\.{1,2}(/|$)"
+              },
+              "pattern": "^[^/\\\\\\u0000]+(?:/[^/\\\\\\u0000]+)*$(?![\\s\\S])"
+            }
+          }
+        },
+        "version": {
+          "type": "integer",
+          "const": 1
+        }
+      },
+      "additionalProperties": false,
+      "$defs": {
+        "Arg": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "template": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            },
+            {
+              "$ref": "#/$defs/ArgGroup"
+            }
+          ]
+        },
+        "ArgGroup": {
+          "type": "object",
+          "properties": {
+            "args": {
+              "description": "Arguments emitted at this position when the condition is true.",
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Arg"
+              }
+            },
+            "when": {
+              "description": "MiniJinja expression that must evaluate to a boolean.",
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        }
+      }
+    },
+    "ProjectMail": {
+      "type": "object",
+      "properties": {
+        "address": {
+          "anyOf": [
+            {
+              "description": "Default address template for agents in this project.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            {
+              "$ref": "#/$defs/EnvReference"
+            },
+            {
+              "$ref": "#/$defs/FileReference"
+            }
+          ]
+        },
+        "bcc": {
+          "description": "Monitoring recipients blind-copied on all outgoing mail.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/MailAddress"
+          }
+        },
+        "cc": {
+          "description": "Monitoring recipients copied on all outgoing mail.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/MailAddress"
+          }
+        },
+        "directory": {
+          "description": "Where local mbox files are stored, relative to the project.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RelativePath"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "from": {
+          "description": "Limit incoming mail from registered agents. Omission allows all agents.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/$defs/AgentSelector"
+          }
+        },
+        "to": {
+          "description": "Limit outgoing mail to registered agents. Omission allows all agents.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/$defs/AgentSelector"
+          }
+        },
+        "transport": {
+          "$ref": "#/$defs/MailConfig"
+        },
+        "trust": {
+          "description": "Human mailboxes trusted as authenticated senders and reply recipients.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/$defs/MailAddress"
+          }
+        },
+        "workspace": {
+          "anyOf": [
+            {
+              "description": "Optional root for discovering mail identities, relative to this project.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            {
+              "$ref": "#/$defs/EnvReference"
+            },
+            {
+              "$ref": "#/$defs/FileReference"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "RelativePath": {
+      "anyOf": [
+        {
+          "description": "A slash-separated relative file path, resolved beneath its owning directory.",
+          "type": "string",
+          "not": {
+            "pattern": "(^|/)\\.{1,2}(/|$)"
+          },
+          "pattern": "^[^/\\\\\\u0000]+(?:/[^/\\\\\\u0000]+)*$(?![\\s\\S])"
+        },
+        {
+          "$ref": "#/$defs/EnvReference"
+        },
+        {
+          "$ref": "#/$defs/FileReference"
+        }
+      ]
+    },
+    "SearchMail": {
+      "type": "object",
+      "properties": {
+        "before_uid": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "limit": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0
+        },
+        "query": {
+          "description": "Text to search in message headers and bodies.",
+          "type": "string"
+        },
+        "unread_only": {
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "query"
+      ]
+    },
+    "Security": {
+      "oneOf": [
+        {
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "tls"
+              ]
+            },
+            {
+              "$ref": "#/$defs/EnvReference"
+            },
+            {
+              "$ref": "#/$defs/FileReference"
+            }
+          ]
+        },
+        {
+          "anyOf": [
+            {
+              "description": "Test/local delivery only; requires a literal loopback address.",
+              "type": "string",
+              "const": "loopback"
+            },
+            {
+              "$ref": "#/$defs/EnvReference"
+            },
+            {
+              "$ref": "#/$defs/FileReference"
+            }
+          ]
+        }
+      ]
+    },
+    "SendMail": {
+      "type": "object",
+      "properties": {
+        "agent": {
+          "description": "Single target agent (shorthand for one entry in to).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "bcc": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "body": {
+          "type": "string"
+        },
+        "cc": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "in_reply_to": {
+          "description": "Reply to this inbox message's Reply-To or From, subject to authorization.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MailRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reply_all": {
+          "description": "Include the original visible To and Cc recipients when replying.",
+          "type": "boolean",
+          "default": false
+        },
+        "subject": {
+          "description": "Required for new mail; defaults to the original subject for replies.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "to": {
+          "description": "Agent IDs, workspace-relative path:agent selectors, or trusted human email addresses.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "body"
+      ]
+    },
+    "SessionIdEvent": {
+      "type": "object",
+      "properties": {
+        "event": {
+          "anyOf": [
+            {
+              "description": "Expected value of the JSON event's `type` field.",
+              "type": "string"
+            },
+            {
+              "$ref": "#/$defs/EnvReference"
+            },
+            {
+              "$ref": "#/$defs/FileReference"
+            }
+          ]
+        },
+        "field": {
+          "anyOf": [
+            {
+              "description": "JSON field containing the native session ID.",
+              "type": "string"
+            },
+            {
+              "$ref": "#/$defs/EnvReference"
+            },
+            {
+              "$ref": "#/$defs/FileReference"
+            }
+          ]
+        },
+        "uuid": {
+          "description": "Require a UUID rather than accepting an arbitrary identifier.",
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "event",
+        "field"
+      ]
+    },
+    "SetRead": {
+      "type": "object",
+      "properties": {
+        "mail": {
+          "$ref": "#/$defs/MailRef"
+        },
+        "read": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "mail",
+        "read"
+      ]
+    },
+    "SourceLogin": {
+      "type": "object",
+      "properties": {
+        "password": {
+          "$ref": "#/$defs/ValueSource"
+        },
+        "username": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "$ref": "#/$defs/EnvReference"
+            },
+            {
+              "$ref": "#/$defs/FileReference"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "username",
+        "password"
+      ]
+    },
+    "Transport": {
+      "anyOf": [
+        {
+          "type": "string",
+          "enum": [
+            "stdio",
+            "http"
+          ]
+        },
+        {
+          "$ref": "#/$defs/EnvReference"
+        },
+        {
+          "$ref": "#/$defs/FileReference"
+        }
+      ]
+    },
+    "ValueSource": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "$ref": "#/$defs/EnvReference"
+        },
+        {
+          "$ref": "#/$defs/FileReference"
+        }
+      ]
+    },
+    "Version": {
+      "type": "integer",
+      "const": 1
+    }
+  }
+}
