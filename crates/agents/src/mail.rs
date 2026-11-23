@@ -50,9 +50,11 @@ pub struct MailConfig {
     smtp: Option<transport::Outgoing>,
     #[serde(default)]
     signatures: signatures::Signatures,
-    /// Accept unsigned mail and use unverified sender and thread headers.
+    /// Accept unsigned mail. Anyone who can deliver mail to the inbox can forge
+    /// From, Reply-To, or thread headers to impersonate a trusted sender,
+    /// redirect replies, or resume an existing agent session.
     #[serde(default)]
-    allow_unsigned: bool,
+    dangerously_allow_unsigned: bool,
     #[serde(default, deserialize_with = "retry::decode")]
     retry: retry::Policy,
 }
@@ -185,7 +187,7 @@ impl<'a> MailAccess<'a> {
             self.mail.open(&self.root, &self.directory, false)?,
             self.address.clone(),
             &self.incoming,
-            self.mail.allow_unsigned,
+            self.mail.dangerously_allow_unsigned,
         )
     }
 

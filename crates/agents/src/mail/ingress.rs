@@ -45,7 +45,7 @@ impl ImapIngress {
                 let mail = workspace.mail();
                 if let Some(task) = mail.signatures.verify(workspace.root(), &raw)? {
                     import(workspace, routes, task, Import::Signed)?;
-                } else if mail.allow_unsigned
+                } else if mail.dangerously_allow_unsigned
                     && let Some(task) = unsigned_task(workspace, routes, None, &raw, &id)?
                 {
                     import(workspace, routes, task, Import::Unsigned(id))?;
@@ -67,7 +67,10 @@ pub fn deliver(
     let routes = workspace.mail_routes()?;
     let mail = workspace.mail();
     let (task, mode) = if unsigned {
-        ensure!(mail.allow_unsigned, "unsigned mail ingress is disabled");
+        ensure!(
+            mail.dangerously_allow_unsigned,
+            "unsigned mail ingress is disabled (mail.transport.dangerously_allow_unsigned)"
+        );
         let recipient = recipient.context("--unsigned requires --recipient")?;
         let id = format!("{}@unsigned.invalid", uuid::Uuid::new_v4());
         let task = unsigned_task(workspace, &routes, Some(recipient), raw, &id)?

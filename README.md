@@ -260,7 +260,7 @@ need GnuPG for OpenPGP and the OpenSSL CLI for S/MIME on `PATH`.
 
 ### Optional unsigned ingress
 
-`mail.transport.allow_unsigned: true` permits unsigned IMAP mail addressed
+`mail.transport.dangerously_allow_unsigned: true` permits unsigned IMAP mail addressed
 to exactly one local agent in `To` or `Cc`, and enables explicit local
 import with `agents mail deliver --unsigned --recipient <address>`.
 Unsigned mail can trigger an agent, receive replies and resume a thread

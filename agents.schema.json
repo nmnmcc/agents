@@ -519,8 +519,8 @@
     "MailConfig": {
       "type": "object",
       "properties": {
-        "allow_unsigned": {
-          "description": "Accept unsigned mail and use unverified sender and thread headers.",
+        "dangerously_allow_unsigned": {
+          "description": "Accept unsigned mail. Anyone who can deliver mail to the inbox can forge\nFrom, Reply-To, or thread headers to impersonate a trusted sender,\nredirect replies, or resume an existing agent session.",
           "type": "boolean",
           "default": false
         },
@@ -1397,8 +1397,8 @@
             "transport": {
               "type": "object",
               "properties": {
-                "allow_unsigned": {
-                  "description": "Accept unsigned mail and use unverified sender and thread headers.",
+                "dangerously_allow_unsigned": {
+                  "description": "Accept unsigned mail. Anyone who can deliver mail to the inbox can forge\nFrom, Reply-To, or thread headers to impersonate a trusted sender,\nredirect replies, or resume an existing agent session.",
                   "type": "boolean",
                   "default": false
                 },

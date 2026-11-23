@@ -260,7 +260,7 @@ pub(super) enum Action {
     Deliver {
         #[arg(long)]
         recipient: Option<MailAddress>,
-        /// Import a genuinely unsigned message; requires mail.transport.allow_unsigned.
+        /// Import an unsigned message; requires mail.transport.dangerously_allow_unsigned.
         #[arg(long)]
         unsigned: bool,
     },

@@ -460,7 +460,7 @@ def test(binary, imap_port):
             assert reply["from"] == REVIEWER
 
             configuration = json.loads(build.read_text())
-            configuration["mail"]["transport"]["allow_unsigned"] = True
+            configuration["mail"]["transport"]["dangerously_allow_unsigned"] = True
             build.write_text(json.dumps(configuration))
             assert (
                 cli(build, "--once").stdout.strip()
@@ -487,7 +487,7 @@ def test(binary, imap_port):
                 cli(build, "--once").stdout.strip()
                 == b"handled " + initial_session + b" resume"
             )
-            configuration["mail"]["transport"]["allow_unsigned"] = False
+            configuration["mail"]["transport"]["dangerously_allow_unsigned"] = False
             build.write_text(json.dumps(configuration))
             assert not search(build, "Anonymous task")
             assert not cli(build, "--once").stdout
