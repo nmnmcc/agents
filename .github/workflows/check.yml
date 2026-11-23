@@ -65,7 +65,10 @@ jobs:
       - name: Clippy
         run: devenv shell -- cargo clippy --locked --workspace --all-targets -- --deny warnings
       - name: Check release configuration
-        run: devenv shell -- knope --validate
+        # Pull requests check out a detached merge commit; knope needs a branch tip.
+        run: |
+          git switch --force-create validate-release
+          devenv shell -- knope --validate
 
   # Plays the role of the Changesets bot: reminds pull requests that change
   # behaviour to describe it with `knope document-change`.
