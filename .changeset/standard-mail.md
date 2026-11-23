@@ -14,7 +14,7 @@ The service runs a worker for each Agent, so Agents handle mail in parallel.
 It waits for IMAP mail with IDLE where supported and reloads the project
 configuration when its files change.
 
-## Migration
+Migration:
 
 - Signed mail no longer uses `Agent-To:` or `Task-ID:` inside the signed
   part, and clearsigned inline OpenPGP is no longer accepted. Address the
