@@ -12,3 +12,9 @@ devenv.local.yaml
 # Rust
 /target/
 .agents/mail/
+
+# Nix build output
+/result
+
+# Release assets
+/dist/

@@ -1,0 +1,22 @@
+name: Setup
+description: Install Nix and, unless disabled, the devenv pinned by devenv.lock
+
+inputs:
+  devenv:
+    description: Whether to install devenv
+    default: "true"
+
+runs:
+  using: composite
+  steps:
+    - uses: cachix/install-nix-action@3dc140bfc76c49fbd4dd958429132e3746bcb086 # v31.11.5
+      with:
+        github_access_token: ${{ github.token }}
+    - if: inputs.devenv == 'true'
+      uses: cachix/cachix-action@38b082610b782e7e93e209c35fd730d399dee866 # v17
+      with:
+        name: devenv
+    - if: inputs.devenv == 'true'
+      name: Install devenv
+      shell: bash
+      run: nix profile install "github:cachix/devenv/$(jq -r .nodes.devenv.locked.rev devenv.lock)"

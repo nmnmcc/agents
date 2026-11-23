@@ -1,0 +1,75 @@
+# Release management, modelled on Changesets (https://github.com/changesets/changesets):
+# every user-facing change adds a file to .changeset/, and the release
+# workflow turns those files into a version bump and a CHANGELOG.md entry.
+
+[package]
+versioned_files = ["crates/agents/Cargo.toml", "Cargo.lock"]
+changelog = "CHANGELOG.md"
+# Only .changeset/ files feed the changelog, not commit messages.
+ignore_conventional_commits = true
+
+# The release workflow builds these into dist/ before running `knope release`.
+[[package.assets]]
+path = "dist/agents-x86_64-unknown-linux-musl.tar.gz"
+
+[[package.assets]]
+path = "dist/agents-x86_64-unknown-linux-musl.tar.gz.sha256"
+
+[[package.assets]]
+path = "dist/agents-aarch64-unknown-linux-musl.tar.gz"
+
+[[package.assets]]
+path = "dist/agents-aarch64-unknown-linux-musl.tar.gz.sha256"
+
+[[package.assets]]
+path = "dist/agents-aarch64-apple-darwin.tar.gz"
+
+[[package.assets]]
+path = "dist/agents-aarch64-apple-darwin.tar.gz.sha256"
+
+# `knope document-change` asks for the change type and summary, then writes a
+# change file under .changeset/.
+[[workflows]]
+name = "document-change"
+
+[[workflows.steps]]
+type = "CreateChangeFile"
+
+# Run by CI on main: applies pending change files on the release branch and
+# opens or updates the release pull request.
+[[workflows]]
+name = "release-pr"
+
+[[workflows.steps]]
+type = "Command"
+command = "git switch --force-create release"
+
+[[workflows.steps]]
+type = "PrepareRelease"
+
+[[workflows.steps]]
+type = "Command"
+command = "git commit --message \"Release $version\""
+variables = { "$version" = "Version" }
+
+[[workflows.steps]]
+type = "Command"
+command = "git push --force --set-upstream origin release"
+
+[[workflows.steps]]
+type = "CreatePullRequest"
+base = "main"
+title = { template = "Release $version", variables = { "$version" = "Version" } }
+body = { template = "Merging this pull request publishes the release below.\n\n$changelog", variables = { "$changelog" = "ChangelogEntry" } }
+
+# Run by CI on main once no change files remain: tags the current version and
+# publishes a GitHub release with its CHANGELOG.md entry and the built assets.
+[[workflows]]
+name = "release"
+
+[[workflows.steps]]
+type = "Release"
+
+[github]
+owner = "nmnmcc"
+repo = "agents"

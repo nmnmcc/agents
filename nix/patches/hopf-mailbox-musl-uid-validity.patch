@@ -1,0 +1,57 @@
+--- a/hopf-mailbox-0.8.0/src/mbox/mailbox.rs
++++ b/hopf-mailbox-0.8.0/src/mbox/mailbox.rs
+@@ -743,5 +743,22 @@
+ fn file_uid_validity(path: &Path) -> MailboxResult<u64> {
+     let meta = std::fs::metadata(path)?;
++
++    // Rust's musl target may not expose file creation time. Ask the Linux
++    // kernel directly to preserve UID validity across GNU and musl builds.
++    // If the filesystem does not provide it, use a stable file identity
++    // instead of modification time, which an append changes.
++    #[cfg(all(target_os = "linux", target_env = "musl"))]
++    if meta.created().is_err() {
++        use std::os::unix::fs::MetadataExt;
++
++        if let Some(secs) = linux_birth_time(path) {
++            return Ok(secs.max(1));
++        }
++        let identity = meta.ino() ^ meta.dev().rotate_left(13);
++        let validity = (identity ^ (identity >> 32)) as u32;
++        return Ok(u64::from(validity.max(1)));
++    }
++
+     let secs = meta
+         .created()
+         .or_else(|_| meta.modified())
+@@ -752,6 +769,31 @@
+     Ok(secs.max(1))
+ }
+ 
++#[cfg(all(target_os = "linux", target_env = "musl"))]
++fn linux_birth_time(path: &Path) -> Option<u64> {
++    use std::{ffi::CString, mem::MaybeUninit, os::unix::ffi::OsStrExt};
++
++    let path = CString::new(path.as_os_str().as_bytes()).ok()?;
++    let mut stat = MaybeUninit::<libc::statx>::zeroed();
++    // SAFETY: path is NUL-terminated and stat points to writable storage
++    // large enough for Linux's statx result.
++    let result = unsafe {
++        libc::syscall(
++            libc::SYS_statx,
++            libc::AT_FDCWD,
++            path.as_ptr(),
++            0 as libc::c_int,
++            libc::STATX_BTIME,
++            stat.as_mut_ptr(),
++        )
++    };
++    if result != 0 {
++        return None;
++    }
++    let stat = unsafe { stat.assume_init() };
++    (stat.stx_mask & libc::STATX_BTIME != 0).then(|| stat.stx_btime.tv_sec.max(0) as u64)
++}
++
+ fn sha256_hex(data: &[u8]) -> String {
+     let mut h = Sha256::new();
+     h.update(trim_trailing_newlines(data));

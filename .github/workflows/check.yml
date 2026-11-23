@@ -1,0 +1,94 @@
+name: Check
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  # Builds the release package. The build also runs `cargo test` and the
+  # install check from devenv.nix.
+  build:
+    name: Build (${{ matrix.runner }})
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm, macos-15]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+        with:
+          devenv: "false"
+      - run: nix build .#agents -L
+
+  # Runs enterTest from devenv.nix, which adds the IMAP/SMTP end-to-end test.
+  test:
+    name: Test
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+      - run: devenv test
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+      - name: Check formatting
+        run: devenv shell -- treefmt --ci
+      - name: Clippy
+        run: devenv shell -- cargo clippy --locked --workspace --all-targets -- --deny warnings
+      - name: Check release configuration
+        run: devenv shell -- knope --validate
+
+  # Plays the role of the Changesets bot: reminds pull requests that change
+  # behaviour to describe it with `knope document-change`.
+  changeset:
+    name: Changeset
+    if: github.event_name == 'pull_request' && github.head_ref != 'release'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Look for a new change file
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          added=$(git diff --name-only --diff-filter=A "$BASE_SHA"...HEAD -- '.changeset/*.md')
+          if [ -n "$added" ]; then
+            echo "Change files:"
+            echo "$added"
+          else
+            echo "::warning title=No change file::This pull request adds no .changeset/ file, so it will not appear in CHANGELOG.md. Run 'knope document-change' if it changes user-facing behaviour."
+          fi

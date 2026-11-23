@@ -1,0 +1,143 @@
+name: Release
+
+# Mirrors the Changesets release flow:
+# - While main has change files in .changeset/, keep a "Release x.y.z" pull
+#   request from the `release` branch up to date. It bumps the version, writes
+#   CHANGELOG.md and deletes the change files.
+# - When main holds a version that has no tag yet (for example after merging
+#   that pull request), build every target and publish the GitHub release.
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # Never interrupt a release that is already publishing.
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  plan:
+    name: Plan
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.plan.outputs.version }}
+      publish: ${{ steps.plan.outputs.publish }}
+      changesets: ${{ steps.plan.outputs.changesets }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' crates/agents/Cargo.toml | head -n1)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/v$version" > /dev/null 2>&1; then
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          fi
+          if compgen -G '.changeset/*.md' > /dev/null; then
+            echo "changesets=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changesets=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  release-pr:
+    name: Release pull request
+    needs: plan
+    if: needs.plan.outputs.changesets == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      pull-requests: write
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          # Pushes made with the default GITHUB_TOKEN do not trigger workflows,
+          # so the release pull request would get no checks. A personal access
+          # token in RELEASE_TOKEN avoids that.
+          token: ${{ secrets.RELEASE_TOKEN || github.token }}
+      - uses: ./.github/actions/setup
+      - name: Open or update the release pull request
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN || github.token }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          devenv shell -- knope release-pr
+
+  build:
+    name: Build (${{ matrix.target }})
+    needs: plan
+    if: needs.plan.outputs.publish == 'true'
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    timeout-minutes: 30
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+          - runner: macos-15
+            target: aarch64-apple-darwin
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+        with:
+          devenv: "false"
+      - run: nix build .#agents -L
+      # Asset names carry no version, so
+      # releases/latest/download/agents-<target>.tar.gz always works.
+      - name: Package
+        env:
+          NAME: agents-${{ matrix.target }}
+        run: |
+          mkdir -p "dist/$NAME"
+          install -m 755 result/bin/agents "dist/$NAME/agents"
+          cp LICENSE README.md CHANGELOG.md "dist/$NAME/"
+          tar -C dist -czf "dist/$NAME.tar.gz" "$NAME"
+          (cd dist && shasum -a 256 "$NAME.tar.gz" > "$NAME.tar.gz.sha256")
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ matrix.target }}
+          path: dist/*.tar.gz*
+          if-no-files-found: error
+
+  publish:
+    name: Publish v${{ needs.plan.outputs.version }}
+    needs: [plan, build]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: dist
+          merge-multiple: true
+      # Tags the current commit and publishes the CHANGELOG.md entry with the
+      # assets listed in knope.toml.
+      - name: Publish the GitHub release
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: devenv shell -- knope release
