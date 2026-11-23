@@ -125,6 +125,30 @@
         "port"
       ]
     },
+    "Env": {
+      "description": "Child-only environment overrides: a map whose `null` values remove inherited\nvariables, or a script that returns such a map.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Script"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "patternProperties": {
+            "^[A-Za-z_][A-Za-z0-9_]*$(?![\\s\\S])": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Template"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
     "EnvName": {
       "type": "string",
       "pattern": "^[A-Za-z_][A-Za-z0-9_]*$(?![\\s\\S])"
@@ -201,22 +225,7 @@
           "$ref": "#/$defs/Capabilities"
         },
         "env": {
-          "description": "Child-only environment overrides; null removes an inherited value.",
-          "type": "object",
-          "additionalProperties": false,
-          "default": {},
-          "patternProperties": {
-            "^[A-Za-z_][A-Za-z0-9_]*$(?![\\s\\S])": {
-              "anyOf": [
-                {
-                  "$ref": "#/$defs/Template"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          }
+          "$ref": "#/$defs/Env"
         },
         "files": {
           "type": "object",
@@ -575,112 +584,12 @@
       ]
     },
     "Mcp": {
-      "oneOf": [
+      "anyOf": [
         {
-          "type": "object",
-          "properties": {
-            "args": {
-              "type": "array",
-              "default": [],
-              "items": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "$ref": "#/$defs/EnvReference"
-                  },
-                  {
-                    "$ref": "#/$defs/FileReference"
-                  }
-                ]
-              }
-            },
-            "command": {
-              "$ref": "#/$defs/Program"
-            },
-            "disable": {
-              "type": "boolean",
-              "writeOnly": true
-            },
-            "env": {
-              "type": "object",
-              "additionalProperties": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "$ref": "#/$defs/EnvReference"
-                  },
-                  {
-                    "$ref": "#/$defs/FileReference"
-                  }
-                ]
-              },
-              "default": {}
-            },
-            "type": {
-              "anyOf": [
-                {
-                  "type": "string",
-                  "const": "stdio"
-                },
-                {
-                  "$ref": "#/$defs/EnvReference"
-                },
-                {
-                  "$ref": "#/$defs/FileReference"
-                }
-              ]
-            }
-          },
-          "additionalProperties": false,
-          "required": [
-            "type",
-            "command"
-          ]
+          "$ref": "#/$defs/StdioMcp"
         },
         {
-          "type": "object",
-          "properties": {
-            "disable": {
-              "type": "boolean",
-              "writeOnly": true
-            },
-            "type": {
-              "anyOf": [
-                {
-                  "type": "string",
-                  "const": "http"
-                },
-                {
-                  "$ref": "#/$defs/EnvReference"
-                },
-                {
-                  "$ref": "#/$defs/FileReference"
-                }
-              ]
-            },
-            "url": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "$ref": "#/$defs/EnvReference"
-                },
-                {
-                  "$ref": "#/$defs/FileReference"
-                }
-              ]
-            }
-          },
-          "additionalProperties": false,
-          "required": [
-            "type",
-            "url"
-          ]
+          "$ref": "#/$defs/RemoteMcp"
         }
       ]
     },
@@ -1052,7 +961,9 @@
                         "type": "string",
                         "enum": [
                           "stdio",
-                          "http"
+                          "http",
+                          "sse",
+                          "ws"
                         ]
                       }
                     },
@@ -1084,37 +995,50 @@
                   "additionalProperties": false
                 },
                 "env": {
-                  "description": "Child-only environment overrides; null removes an inherited value.",
-                  "type": "object",
-                  "additionalProperties": false,
-                  "default": {},
-                  "patternProperties": {
-                    "^[A-Za-z_][A-Za-z0-9_]*$(?![\\s\\S])": {
-                      "anyOf": [
-                        {
-                          "description": "MiniJinja text, or `{\"js\": \"...\"}`.",
+                  "description": "Child-only environment overrides: a map whose `null` values remove inherited\nvariables, or a script that returns such a map.",
+                  "anyOf": [
+                    {
+                      "description": "JavaScript run in QuickJS with no I/O. The template context is exposed as\nglobal variables; the value of the last statement is the result. Output hooks\nkeep `globalThis` for the whole run; other scripts start from a fresh context.",
+                      "type": "object",
+                      "properties": {
+                        "js": {
+                          "type": "string"
+                        }
+                      },
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "patternProperties": {
+                        "^[A-Za-z_][A-Za-z0-9_]*$(?![\\s\\S])": {
                           "anyOf": [
                             {
-                              "type": "string"
+                              "description": "MiniJinja text, or `{\"js\": \"...\"}`.",
+                              "anyOf": [
+                                {
+                                  "type": "string"
+                                },
+                                {
+                                  "description": "JavaScript run in QuickJS with no I/O. The template context is exposed as\nglobal variables; the value of the last statement is the result. Output hooks\nkeep `globalThis` for the whole run; other scripts start from a fresh context.",
+                                  "type": "object",
+                                  "properties": {
+                                    "js": {
+                                      "type": "string"
+                                    }
+                                  },
+                                  "additionalProperties": false
+                                }
+                              ]
                             },
                             {
-                              "description": "JavaScript run in QuickJS with no I/O. The template context is exposed as\nglobal variables; the value of the last statement is the result. Output hooks\nkeep `globalThis` for the whole run; other scripts start from a fresh context.",
-                              "type": "object",
-                              "properties": {
-                                "js": {
-                                  "type": "string"
-                                }
-                              },
-                              "additionalProperties": false
+                              "type": "null"
                             }
                           ]
-                        },
-                        {
-                          "type": "null"
                         }
-                      ]
+                      }
                     }
-                  }
+                  ]
                 },
                 "files": {
                   "type": "object",
@@ -1814,6 +1738,12 @@
                             "pattern": "\\u0000"
                           }
                         },
+                        "cwd": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
                         "disable": {
                           "type": "boolean",
                           "writeOnly": true
@@ -1827,7 +1757,10 @@
                         },
                         "type": {
                           "type": "string",
-                          "const": "stdio"
+                          "default": "stdio",
+                          "enum": [
+                            "stdio"
+                          ]
                         }
                       },
                       "additionalProperties": false
@@ -1839,9 +1772,20 @@
                           "type": "boolean",
                           "writeOnly": true
                         },
+                        "headers": {
+                          "type": "object",
+                          "additionalProperties": {
+                            "type": "string"
+                          }
+                        },
                         "type": {
                           "type": "string",
-                          "const": "http"
+                          "enum": [
+                            "http",
+                            "streamable-http",
+                            "sse",
+                            "ws"
+                          ]
                         },
                         "url": {
                           "type": "string"
@@ -1981,6 +1925,71 @@
             "pattern": "(^|/)\\.{1,2}(/|$)"
           },
           "pattern": "^[^/\\\\\\u0000]+(?:/[^/\\\\\\u0000]+)*$(?![\\s\\S])"
+        },
+        {
+          "$ref": "#/$defs/EnvReference"
+        },
+        {
+          "$ref": "#/$defs/FileReference"
+        }
+      ]
+    },
+    "RemoteMcp": {
+      "type": "object",
+      "properties": {
+        "disable": {
+          "type": "boolean",
+          "writeOnly": true
+        },
+        "headers": {
+          "type": "object",
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "$ref": "#/$defs/EnvReference"
+              },
+              {
+                "$ref": "#/$defs/FileReference"
+              }
+            ]
+          }
+        },
+        "type": {
+          "$ref": "#/$defs/RemoteTransport"
+        },
+        "url": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "$ref": "#/$defs/EnvReference"
+            },
+            {
+              "$ref": "#/$defs/FileReference"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "url"
+      ]
+    },
+    "RemoteTransport": {
+      "anyOf": [
+        {
+          "type": "string",
+          "enum": [
+            "http",
+            "streamable-http",
+            "sse",
+            "ws"
+          ]
         },
         {
           "$ref": "#/$defs/EnvReference"
@@ -2204,6 +2213,92 @@
         "read"
       ]
     },
+    "StdioMcp": {
+      "type": "object",
+      "properties": {
+        "args": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "$ref": "#/$defs/EnvReference"
+              },
+              {
+                "$ref": "#/$defs/FileReference"
+              }
+            ]
+          }
+        },
+        "command": {
+          "$ref": "#/$defs/Program"
+        },
+        "cwd": {
+          "anyOf": [
+            {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            {
+              "$ref": "#/$defs/EnvReference"
+            },
+            {
+              "$ref": "#/$defs/FileReference"
+            }
+          ]
+        },
+        "disable": {
+          "type": "boolean",
+          "writeOnly": true
+        },
+        "env": {
+          "type": "object",
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "$ref": "#/$defs/EnvReference"
+              },
+              {
+                "$ref": "#/$defs/FileReference"
+              }
+            ]
+          },
+          "default": {}
+        },
+        "type": {
+          "$ref": "#/$defs/StdioTransport",
+          "default": "stdio"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "command"
+      ]
+    },
+    "StdioTransport": {
+      "anyOf": [
+        {
+          "type": "string",
+          "enum": [
+            "stdio"
+          ]
+        },
+        {
+          "$ref": "#/$defs/EnvReference"
+        },
+        {
+          "$ref": "#/$defs/FileReference"
+        }
+      ]
+    },
     "Template": {
       "description": "MiniJinja text, or `{\"js\": \"...\"}`.",
       "anyOf": [
@@ -2231,7 +2326,9 @@
           "type": "string",
           "enum": [
             "stdio",
-            "http"
+            "http",
+            "sse",
+            "ws"
           ]
         },
         {

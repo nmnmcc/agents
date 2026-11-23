@@ -33,7 +33,6 @@ pub struct Sessions {
     path: PathBuf,
     records: BTreeMap<String, Native>,
     current: Native,
-    triggered_by_mail: bool,
 }
 
 /// A native session ID reported by the harness while it runs.
@@ -75,7 +74,7 @@ impl Sessions {
         directory: &Path,
         agent: &Id,
         harness: &Id,
-        event: Option<&MailEvent>,
+        event: &MailEvent,
     ) -> Result<(Self, harness::Session)> {
         let lock = store::prepare(root, directory, &format!("sessions-{agent}.lock"))?;
         let lock = fs::OpenOptions::new().read(true).write(true).open(lock)?;
@@ -93,7 +92,7 @@ impl Sessions {
         } else {
             serde_json::from_slice(&bytes).context("decode mail session bindings")?
         };
-        let keys = event.map(MailEvent::keys).unwrap_or_default();
+        let keys = event.keys();
         let mut matches = keys.iter().filter_map(|key| records.get(key));
         let existing = matches.next().cloned();
         let resume = existing.is_some();
@@ -126,7 +125,6 @@ impl Sessions {
                 path,
                 records,
                 current,
-                triggered_by_mail: event.is_some(),
             },
             session,
         ))
@@ -161,7 +159,7 @@ impl Sessions {
             same_session = true;
         }
         ensure!(
-            !self.triggered_by_mail || same_session,
+            same_session,
             "reply does not belong to the active mail thread"
         );
         Ok(keys)
@@ -195,32 +193,33 @@ mod tests {
         let directory = Path::new("mail");
         let agent = "reviewer".parse().unwrap();
         let harness = "claude".parse().unwrap();
-        let open = |event: Option<&MailEvent>| {
+        let open = |event: &MailEvent| {
             Sessions::open(root.path(), directory, &agent, &harness, event).unwrap()
         };
-        let (mut bindings, original) = open(None);
-        assert!(!original.resume);
-        bindings
-            .bind_outgoing([message_key("human@example.test", "outgoing@example.test")])
-            .unwrap();
-        drop(bindings);
-
         let mut event = MailEvent {
             mail: MailRef {
                 uid: 1,
                 uid_validity: 1,
             },
             sender: "human@example.test".into(),
-            ids: vec!["outgoing@example.test".into(), "reply@example.test".into()],
+            ids: vec!["request@example.test".into()],
         };
-        let (bindings, resumed) = open(Some(&event));
+        let (mut bindings, original) = open(&event);
+        assert!(!original.resume);
+        bindings
+            .bind_outgoing([message_key("human@example.test", "outgoing@example.test")])
+            .unwrap();
+        drop(bindings);
+
+        event.ids = vec!["outgoing@example.test".into(), "reply@example.test".into()];
+        let (bindings, resumed) = open(&event);
         assert!(resumed.resume);
         assert_eq!(resumed.id, original.id);
         assert!(bindings.reply_keys(&event).is_ok());
         drop(bindings);
 
         event.sender = "other@example.test".into();
-        let (_bindings, unrelated) = open(Some(&event));
+        let (_bindings, unrelated) = open(&event);
         assert!(!unrelated.resume);
         assert_ne!(unrelated.id, original.id);
     }

@@ -1,6 +1,6 @@
 use super::support::{Fixture, cli, copy_sample_harness_layer, sample_project};
 use serde_json::{Value, json};
-use std::{fs, io::Write, os::unix::fs::PermissionsExt, path::Path, process::Stdio};
+use std::{fs, os::unix::fs::PermissionsExt, path::Path};
 
 #[test]
 fn previews_and_runs_from_nested_directory() {
@@ -23,24 +23,11 @@ fn previews_and_runs_from_nested_directory() {
     assert_eq!(preview["child_env"]["AGENTS_TEST_REMOVE"], Value::Null);
     assert!(!fixture.root.join("native.json").exists());
 
-    let mut child = fixture
-        .command()
-        .arg("run")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(b"--not-a-flag $(no) {{ model }}\n")
-        .unwrap();
-    let output = child.wait_with_output().unwrap();
-    assert_eq!(
-        output.status.code(),
-        Some(23),
+    let output = fixture.handle_mail("reviewer", "--not-a-flag $(no) {{ model }}");
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("agents: reviewer: harness exit status: 23"),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
@@ -64,7 +51,8 @@ fn previews_and_runs_from_nested_directory() {
             .unwrap()
             .ends_with("/review/SKILL.md")
     );
-    assert_eq!(stdin, "Task:\n--not-a-flag $(no) {{ model }}\n");
+    assert!(stdin.starts_with("Task:\nThe new message in your inbox follows."));
+    assert!(stdin.contains("--not-a-flag $(no) {{ model }}"), "{stdin}");
 }
 
 #[test]
@@ -72,7 +60,8 @@ fn selected_agent_chooses_its_own_harness_and_model() {
     let mut fixture = Fixture::new();
     fixture.project["harnesses"]["build"] = json!({
         "program": "/bin/sh",
-        "args": ["-c", "printf '%s' \"$1\"", "build", "{{ model }}"]
+        "args": ["-c", "printf '%s' \"$1\"", "build", "{{ model }}"],
+        "capabilities": {"mcp": ["stdio"]}
     });
     fixture.project["agents"]["builder"] = json!({
         "harness": "build",
@@ -96,11 +85,7 @@ fn selected_agent_chooses_its_own_harness_and_model() {
             .contains(&json!("test model"))
     );
 
-    let selected = fixture
-        .command()
-        .args(["run", "--agent", "builder"])
-        .output()
-        .unwrap();
+    let selected = fixture.handle_mail("builder", "Build it.");
     assert!(
         selected.status.success(),
         "{}",
@@ -231,11 +216,21 @@ fn adapters_translate_the_same_agent_and_both_mcp_transports() {
     let mut fixture = Fixture::new();
     copy_sample_harness_layer(&fixture.root);
     fixture.project["agents"]["reviewer"]["mcp"] = json!(["search", "remote"]);
-    fixture.project["mcp"]["remote"] = json!({"type":"http","url":"https://example.test/mcp"});
+    fixture.project["mcp"]["remote"] = json!({
+        "type": "streamable-http", "url": "https://example.test/mcp",
+        "headers": {"X-Example": "test-header-value"}
+    });
+    fixture.project["mcp"]["search"]
+        .as_object_mut()
+        .unwrap()
+        .remove("type");
     fixture.project["mcp"]["search"]["env"] = json!({"ODD_VALUE": "a \"quote\"\na newline"});
 
     let mut plans = Vec::new();
     for harness in ["claude", "codex", "opencode"] {
+        if harness != "claude" {
+            fixture.project["mcp"]["search"]["cwd"] = json!("tools");
+        }
         fixture.project["agents"]["reviewer"]["harness"] = json!(harness);
         fixture.save();
         let output = fixture
@@ -264,12 +259,17 @@ fn adapters_translate_the_same_agent_and_both_mcp_transports() {
         serde_json::from_str(plans[0]["files"]["mcp.json"].as_str().unwrap()).unwrap();
     assert_eq!(claude["mcpServers"]["search"]["type"], "stdio");
     assert_eq!(claude["mcpServers"]["remote"]["type"], "http");
+    assert_eq!(
+        claude["mcpServers"]["remote"]["headers"]["X-Example"],
+        "test-header-value"
+    );
 
     let codex = plans[1]["args"].as_array().unwrap();
     let mcp = codex
         .iter()
         .find_map(|arg| arg.as_str().filter(|arg| arg.starts_with("mcp_servers=")))
         .unwrap();
+    assert!(!mcp.contains("test-header-value"));
     let mcp: toml::Table = toml::from_str(mcp).unwrap();
     assert_eq!(
         mcp["mcp_servers"]["search"]["env"]["ODD_VALUE"].as_str(),
@@ -279,6 +279,11 @@ fn adapters_translate_the_same_agent_and_both_mcp_transports() {
         mcp["mcp_servers"]["remote"]["required"].as_bool(),
         Some(true)
     );
+    assert_eq!(mcp["mcp_servers"]["search"]["cwd"].as_str(), Some("tools"));
+    let header_env = mcp["mcp_servers"]["remote"]["env_http_headers"]["X-Example"]
+        .as_str()
+        .unwrap();
+    assert_eq!(plans[1]["child_env"][header_env], "test-header-value");
     let instructions = codex
         .iter()
         .find_map(|arg| {
@@ -309,7 +314,80 @@ fn adapters_translate_the_same_agent_and_both_mcp_transports() {
         opencode["mcp"]["servers"]["search"]["command"],
         json!(["example", "a b"])
     );
+    assert_eq!(opencode["mcp"]["servers"]["search"]["cwd"], "tools");
     assert_eq!(opencode["mcp"]["servers"]["remote"]["type"], "remote");
+    assert_eq!(
+        opencode["mcp"]["servers"]["remote"]["headers"]["X-Example"],
+        "test-header-value"
+    );
+}
+
+#[test]
+fn adapters_handle_legacy_and_client_specific_transports_explicitly() {
+    let mut fixture = Fixture::new();
+    copy_sample_harness_layer(&fixture.root);
+    fixture.project["agents"]["reviewer"]["mcp"] = json!(["remote"]);
+    for (transport, url) in [
+        ("sse", "https://example.test/sse"),
+        ("ws", "wss://example.test/mcp"),
+    ] {
+        // A header named "file" is a literal header, not a file reference.
+        fixture.project["mcp"]["remote"] =
+            json!({"type": transport, "url": url, "headers": {"file": "literal"}});
+        for harness in ["claude", "codex", "opencode"] {
+            fixture.project["agents"]["reviewer"]["harness"] = json!(harness);
+            fixture.save();
+            let output = fixture
+                .command()
+                .args(["config", "render"])
+                .output()
+                .unwrap();
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if harness == "claude" {
+                assert!(output.status.success(), "{stderr}");
+                let plan: Value = serde_json::from_slice(&output.stdout).unwrap();
+                let file: Value =
+                    serde_json::from_str(plan["files"]["mcp.json"].as_str().unwrap()).unwrap();
+                assert_eq!(
+                    file["mcpServers"]["remote"],
+                    fixture.project["mcp"]["remote"]
+                );
+            } else {
+                assert!(!output.status.success());
+                assert!(
+                    stderr.contains("does not support the transport for MCP"),
+                    "{stderr}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn remote_header_references_are_redacted_in_previews() {
+    let mut fixture = Fixture::new();
+    copy_sample_harness_layer(&fixture.root);
+    fixture.project["agents"]["reviewer"]["harness"] = json!("codex");
+    fixture.project["agents"]["reviewer"]["mcp"] = json!(["remote"]);
+    fixture.project["mcp"]["remote"] = json!({
+        "type": "http", "url": "https://example.test/mcp",
+        "headers": {"Authorization": {"env": "AGENTS_TEST_MCP_HEADER"}}
+    });
+    fixture.save();
+    let output = fixture
+        .command()
+        .env("AGENTS_TEST_MCP_HEADER", "Bearer dummy-secret")
+        .args(["config", "render"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let preview: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(preview["redacted"], true);
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("dummy-secret"));
 }
 
 #[test]
@@ -336,16 +414,10 @@ fn hooks_surround_the_run_and_filter_its_output() {
         "env": {"AGENTS_HOOK": "{{ agent.id }}"}
     });
     fixture.save();
-    let run = |fixture: &Fixture| {
-        fixture
-            .command()
-            .arg("run")
-            .stdin(Stdio::null())
-            .output()
-            .unwrap()
-    };
+    let run = |fixture: &Fixture| fixture.handle_mail("reviewer", "Check.");
     let output = run(&fixture);
-    assert_eq!(output.status.code(), Some(3), "{output:?}");
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("harness exit status: 3"));
     assert_eq!(String::from_utf8_lossy(&output.stdout), "1:one\n3:two\n");
     assert!(String::from_utf8_lossy(&output.stderr).contains("stderr:warn\n"));
     let log = fixture.root.join("hooks.log");

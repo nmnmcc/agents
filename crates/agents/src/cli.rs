@@ -2,7 +2,7 @@ mod mail;
 
 use crate::{
     config::{self, schema},
-    daemon, harness, mail as mailbox, service, types,
+    daemon, harness, mail as mailbox, service,
 };
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -16,9 +16,13 @@ use std::{
 #[command(
     version,
     about,
-    after_help = "With no command, watch the current project and run agents for unread mail."
+    after_help = "With no command, watch the current project: flush outgoing mail and run \
+                  each agent on its new unread mail."
 )]
 struct Args {
+    /// Without a command, make one pass and exit; fail if any delivery or run failed.
+    #[arg(long)]
+    once: bool,
     #[command(subcommand)]
     command: Option<Action>,
 }
@@ -27,14 +31,7 @@ struct Args {
 enum Action {
     #[command(hide = true)]
     MailMcp { socket: PathBuf },
-    /// Run a project agent with the task read from stdin.
-    Run {
-        directory: Option<PathBuf>,
-        /// Select a project agent instead of using the project's default.
-        #[arg(long)]
-        agent: Option<types::Id>,
-    },
-    /// Access agent mailboxes, send mail, or inspect saved messages.
+    /// Access agent mailboxes, send or deliver mail, or inspect the outbox.
     Mail {
         /// Find the project from this directory (default: current directory).
         #[arg(long, global = true)]
@@ -76,8 +73,11 @@ enum ConfigAction {
 
 fn run(args: Args) -> Result<ExitCode> {
     let Some(command) = args.command else {
-        daemon::serve()?;
-        return Ok(ExitCode::SUCCESS);
+        return Ok(if daemon::serve(args.once)? {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::FAILURE
+        });
     };
     match command {
         Action::Service { platform, command } => {
@@ -100,30 +100,12 @@ fn run(args: Args) -> Result<ExitCode> {
             mailbox::mcp::serve(socket)?;
             Ok(ExitCode::SUCCESS)
         }
-        Action::Run { directory, agent } => run_agent(
-            &config::Workspace::load(directory.as_deref())?,
-            agent.as_ref(),
-            io::stdin().lock(),
-        ),
         Action::Config { command } => {
             command.run()?;
             Ok(ExitCode::SUCCESS)
         }
         Action::Mail { directory, command } => command.run(directory),
     }
-}
-
-/// Run an agent with the task as input, attaching its mailbox when it has an address.
-fn run_agent(
-    workspace: &config::Workspace,
-    agent: Option<&types::Id>,
-    task: impl io::Read,
-) -> Result<ExitCode> {
-    let (project, routes) = workspace.project_for_run(agent)?;
-    let identity = routes
-        .as_ref()
-        .and_then(|routes| routes.identity(&project).map(|mailbox| (routes, mailbox)));
-    mailbox::execute(project, task, workspace.mail(), identity, None)
 }
 
 impl ConfigAction {

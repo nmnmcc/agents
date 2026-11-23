@@ -199,7 +199,7 @@ def test(binary, imap_port):
                     capture_output=True,
                     input=task,
                     env=dict(os.environ, AGENTS_SMOKE_IMAP="pass"),
-                    timeout=15,
+                    timeout=60,
                 )
                 assert (proc.returncode == 0) == success, proc.stderr
                 return proc
@@ -236,22 +236,37 @@ def test(binary, imap_port):
             )
             cli("mail", "flush")
             assert not smtp.sent, "new inbound mail must not start an agent"
-            assert cli("run", project, task="Inspect inbox.").stdout.strip() == "built"
+            # Leave only the initial request unread, so one pass runs one agent.
+            for agent, query in (
+                ("build", "followup@example.test"),
+                ("review", "private-reviewer"),
+            ):
+                found = json.loads(
+                    cli("mail", "search", "--agent", agent, query).stdout
+                )
+                ref = found["messages"][0]["mail"]
+                cli(
+                    "mail",
+                    "set-read",
+                    "--agent",
+                    agent,
+                    "--uid-validity",
+                    str(ref["uid_validity"]),
+                    str(ref["uid"]),
+                    "read",
+                )
+            assert cli("--once").stdout.strip() == "built"
             assert not smtp.sent, "send_mail queues mail for flush"
             cli("mail", "flush")
             assert [item[:2] for item in smtp.sent] == [
                 (MAILBOXES["build"].encode(), MAILBOXES["review"].encode())
             ]
-            assert (
-                cli(
-                    "run", "--agent", "review", project, task="Check your inbox."
-                ).stdout.strip()
-                == "reviewed"
-            )
+            assert cli("--once").stdout.strip() == "reviewed"
             cli("mail", "flush")
-            assert len(smtp.sent) == 1, "a local run must not automatically reply"
+            assert len(smtp.sent) == 1, "a run must not automatically reply"
 
-            cli("run", project, task="Retry task.")
+            append(imap_port, message("human@example.test", "build", "retry"))
+            assert cli("--once").stdout.strip() == "built"
             smtp.lose_ack = True
             cli("mail", "flush", success=False)
             pending = json.loads(cli("mail", "pending").stdout)
@@ -309,6 +324,7 @@ def test(binary, imap_port):
             assert json.loads(
                 mail_cli("search", "fulltext-payload", "--unread-only").stdout
             )["messages"]
+            mail_cli("set-read", *args, "read")
 
             mail_cli(
                 "send",
@@ -385,7 +401,13 @@ def test(binary, imap_port):
                 str(follow["uid"]),
                 task="CLI reply",
             )
-            cli("run", project, task="MCP reply.")
+            append(
+                imap_port,
+                message("human@example.test", "build", "mcp").replace(
+                    b"Do the work.", b"MCP reply."
+                ),
+            )
+            cli("--once")
             cli("mail", "flush")
             cli_reply, mcp_reply, blind_copy = smtp.sent[8:]
             assert (

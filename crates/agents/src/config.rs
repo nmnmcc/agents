@@ -93,6 +93,8 @@ pub struct Agent {
 pub enum Transport {
     Stdio,
     Http,
+    Sse,
+    Ws,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -132,29 +134,77 @@ impl JsonSchema for Disabled {
 }
 
 #[derive(Clone, Deserialize, Serialize, JsonSchema)]
-#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(untagged)]
 pub enum Mcp {
-    Stdio {
-        #[serde(default, rename = "disable", skip_serializing)]
-        _disable: bool,
-        command: Program,
-        #[serde(default)]
-        args: Vec<String>,
-        #[serde(default)]
-        env: BTreeMap<String, String>,
-    },
-    Http {
-        #[serde(default, rename = "disable", skip_serializing)]
-        _disable: bool,
-        url: String,
-    },
+    Stdio(StdioMcp),
+    Remote(RemoteMcp),
+}
+
+#[derive(Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct StdioMcp {
+    #[serde(default, rename = "type")]
+    transport: StdioTransport,
+    #[serde(default, rename = "disable", skip_serializing)]
+    _disable: bool,
+    command: Program,
+    #[serde(default)]
+    args: Vec<String>,
+    #[serde(default)]
+    env: BTreeMap<String, String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cwd: Option<String>,
+}
+
+#[derive(Clone, Default, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum StdioTransport {
+    #[default]
+    Stdio,
+}
+
+#[derive(Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RemoteMcp {
+    #[serde(rename = "type")]
+    transport: RemoteTransport,
+    #[serde(default, rename = "disable", skip_serializing)]
+    _disable: bool,
+    url: String,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    headers: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum RemoteTransport {
+    Http,
+    #[serde(rename(deserialize = "streamable-http", serialize = "http"))]
+    StreamableHttp,
+    Sse,
+    Ws,
 }
 
 impl Mcp {
+    pub fn stdio(command: Program, args: Vec<String>) -> Self {
+        Self::Stdio(StdioMcp {
+            transport: StdioTransport::Stdio,
+            _disable: false,
+            command,
+            args,
+            env: BTreeMap::new(),
+            cwd: None,
+        })
+    }
+
     pub fn transport(&self) -> Transport {
         match self {
-            Self::Stdio { .. } => Transport::Stdio,
-            Self::Http { .. } => Transport::Http,
+            Self::Stdio(_) => Transport::Stdio,
+            Self::Remote(server) => match server.transport {
+                RemoteTransport::Http | RemoteTransport::StreamableHttp => Transport::Http,
+                RemoteTransport::Sse => Transport::Sse,
+                RemoteTransport::Ws => Transport::Ws,
+            },
         }
     }
 }

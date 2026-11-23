@@ -12,63 +12,66 @@ use std::{
 
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
 
-pub fn serve() -> Result<()> {
+/// Flushes the outbox and runs agents for unread mail, forever or, with `once`, a single time.
+/// Returns whether every delivery and run in the last pass succeeded.
+pub fn serve(once: bool) -> Result<bool> {
     let workspace = Workspace::load(None)?;
     let routes = workspace.mail_routes()?;
     let mut observed = BTreeMap::<Id, BTreeSet<MailRef>>::new();
-    eprintln!("agents: watching {}", workspace.root().display());
+    if !once {
+        eprintln!("agents: watching {}", workspace.root().display());
+    }
     loop {
+        let mut ok = true;
         if let Err(error) = mail::flush(&workspace) {
             eprintln!("agents: flush: {error:#}");
+            ok = false;
         }
         for (id, mailbox) in routes.project_mailboxes(workspace.root()) {
-            if let Err(error) = run_if_unread(
-                &workspace,
-                &routes,
-                id,
-                mailbox,
-                observed.entry(id.clone()).or_default(),
-            ) {
-                eprintln!("agents: {id}: {error:#}");
+            let observed = observed.entry(id.clone()).or_default();
+            match run_unread(&workspace, &routes, id, mailbox, observed) {
+                Ok(succeeded) => ok &= succeeded,
+                Err(error) => {
+                    eprintln!("agents: {id}: {error:#}");
+                    ok = false;
+                }
             }
+        }
+        if once {
+            return Ok(ok);
         }
         thread::sleep(POLL_INTERVAL);
     }
 }
 
-fn run_if_unread(
+/// Runs the agent once for each unread message not yet observed; returns whether all succeeded.
+fn run_unread(
     workspace: &Workspace,
     routes: &MailRoutes,
     id: &Id,
     mailbox: &AgentMailbox,
     observed: &mut BTreeSet<MailRef>,
-) -> Result<()> {
+) -> Result<bool> {
     let unread = MailAccess::new(workspace.mail(), routes, mailbox)?.unread_refs()?;
     let arrived: Vec<_> = unread.difference(observed).copied().collect();
     // Do not mark mail read, or spawn repeatedly on unchanged mail if the run fails.
     *observed = unread;
+    let mut succeeded = true;
     for message in arrived {
         eprintln!("agents: routing unread mail {} to {id}", message.uid);
-        let task = b"Consider the new message in this thread and handle requests appropriate \
-                     to your role. Reply in this mail thread when appropriate and mark \
-                     the message read once handled.\n";
-        let result = workspace.project(Some(id)).and_then(|project| {
-            mail::execute(
-                project,
-                task.as_slice(),
-                workspace.mail(),
-                Some((routes, mailbox)),
-                Some(message),
-            )
-        });
+        let result = workspace
+            .project(Some(id))
+            .and_then(|project| mail::execute(project, workspace.mail(), routes, mailbox, message));
         match result {
-            Ok(status) if status == std::process::ExitCode::SUCCESS => {}
-            Ok(_) => eprintln!("agents: {id}: harness exited unsuccessfully"),
+            Ok(status) if status.success() => continue,
+            Ok(status) => eprintln!("agents: {id}: harness {status}"),
             Err(error) if error.is::<SessionBusy>() => {
                 observed.remove(&message);
+                continue;
             }
             Err(error) => eprintln!("agents: {id}: {error:#}"),
         }
+        succeeded = false;
     }
-    Ok(())
+    Ok(succeeded)
 }

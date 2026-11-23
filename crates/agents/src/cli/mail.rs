@@ -1,8 +1,8 @@
-use super::{print_json, run_agent};
+use super::print_json;
 use crate::{
     config::Workspace,
     mail::{
-        self, MailAccess, message,
+        self, MailAccess,
         request::{GetAttachment, ListMail, MailRef, Request, SearchMail, SendMail, SetRead},
     },
     types::{Id, MailAddress},
@@ -261,18 +261,6 @@ pub(super) enum Action {
         #[arg(long)]
         authenticated_from: MailAddress,
     },
-    /// Show the selected project and decoded plain-text task without executing it.
-    Inspect {
-        /// Envelope recipient supplied by the operator, not a mail header.
-        #[arg(long)]
-        recipient: MailAddress,
-    },
-    /// Run a message explicitly approved by the local operator. Does not send a reply.
-    Run {
-        /// Envelope recipient supplied by the operator, not a mail header.
-        #[arg(long)]
-        recipient: MailAddress,
-    },
 }
 
 impl Action {
@@ -303,28 +291,6 @@ impl Action {
                 io::stdin().lock().read_to_end(&mut raw)?;
                 mail::deliver(&workspace, &recipient, &authenticated_from, &raw)?;
                 Ok(ExitCode::SUCCESS)
-            }
-            Self::Inspect { recipient } => {
-                let routes = workspace.mail_routes()?;
-                let route = routes.route(&recipient)?;
-                let task = message::Task::read(io::stdin().lock())?;
-                print_json(&message::Preview {
-                    project: &route.project.root,
-                    agent: &route.agent,
-                    recipient: &recipient,
-                    task,
-                })?;
-                Ok(ExitCode::SUCCESS)
-            }
-            Self::Run { recipient } => {
-                let routes = workspace.mail_routes()?;
-                let route = routes.route(&recipient)?;
-                let task = message::Task::read(io::stdin().lock())?;
-                run_agent(
-                    &Workspace::at_mailbox(route),
-                    Some(&route.agent),
-                    task.body.as_bytes(),
-                )
             }
         }
     }

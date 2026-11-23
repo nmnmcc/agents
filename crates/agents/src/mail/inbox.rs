@@ -93,11 +93,6 @@ impl<'a> Inbox<'a> {
         self.page(uids, request.limit, None)
     }
 
-    pub fn preview(&mut self) -> Result<Value> {
-        let uids = self.candidates("", true, None)?;
-        self.page(uids, Some(10), None)
-    }
-
     pub fn unread_refs(&mut self) -> Result<BTreeSet<MailRef>> {
         let mut unread = BTreeSet::new();
         for uid in self.candidates("", true, None)? {

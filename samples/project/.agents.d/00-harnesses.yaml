@@ -16,7 +16,7 @@ harnesses:
       - --mcp-config
       - "{{ paths['mcp.json'] }}"
     capabilities:
-      mcp: [stdio, http]
+      mcp: [stdio, http, sse, ws]
       skills: true
       sessions: supplied
     files:
@@ -43,8 +43,14 @@ harnesses:
           {% endif %}
       mcp.json:
         format: json
-        template: |
-          {"mcpServers": {{ mcp | tojson }}}
+        template:
+          js: |
+            for (const [name, server] of Object.entries(mcp)) {
+              if (server.cwd !== undefined) {
+                throw new Error(`Claude Code does not support cwd for MCP server ${name}`);
+              }
+            }
+            ({ mcpServers: mcp })
 
   codex:
     program: codex
@@ -80,16 +86,30 @@ harnesses:
             : value !== null && typeof value === "object"
               ? `{${Object.entries(value).map(([k, v]) => `${JSON.stringify(k)} = ${toml(v)}`).join(", ")}}`
               : JSON.stringify(value);
-          const servers = Object.entries(mcp).map(([name, server]) => [
+          const servers = Object.entries(mcp).map(([name, server], index) => [
             name,
             server.type === "stdio"
-              ? { command: server.command, args: server.args, env: server.env, required: true }
-              : { url: server.url, required: true },
+              ? { command: server.command, args: server.args, env: server.env,
+                  ...(server.cwd === undefined ? {} : { cwd: server.cwd }), required: true }
+              : { url: server.url, required: true,
+                  ...(server.headers === undefined ? {} : {
+                    env_http_headers: Object.fromEntries(Object.keys(server.headers).map(
+                      (header, field) => [header, `AGENTS_MCP_HEADER_${index}_${field}`]
+                    ))
+                  }) },
           ]);
           "mcp_servers=" + toml(Object.fromEntries(servers))
       - js: 'model === null ? null : ["--model", model]'
       - js: 'session?.resume ? ["resume", session.id] : null'
       - "-"
+    env:
+      js: |
+        // Keep header values out of the Codex command line.
+        Object.fromEntries(Object.values(mcp).flatMap((server, index) =>
+          Object.values(server.headers ?? {}).map(
+            (value, field) => [`AGENTS_MCP_HEADER_${index}_${field}`, value]
+          )
+        ))
     hooks:
       # Codex assigns its own thread UUID and reports it in a JSON event.
       stdout:
@@ -147,8 +167,10 @@ harnesses:
             const servers = Object.entries(mcp).map(([name, server]) => [
               name,
               server.type === "stdio"
-                ? { type: "local", command: [server.command, ...server.args], environment: server.env }
-                : { type: "remote", url: server.url },
+                ? { type: "local", command: [server.command, ...server.args], environment: server.env,
+                    ...(server.cwd === undefined ? {} : { cwd: server.cwd }) }
+                : { type: "remote", url: server.url,
+                    ...(server.headers === undefined ? {} : { headers: server.headers }) },
             ]);
             ({
               $schema: "https://opencode.ai/config.json",

@@ -1,6 +1,5 @@
 mod inbox;
 pub mod mcp;
-pub mod message;
 mod outbox;
 pub mod request;
 mod retry;

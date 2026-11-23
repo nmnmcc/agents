@@ -1,6 +1,6 @@
-use super::support::{Fixture, cli, copy_sample_harness_layer};
+use super::support::{Fixture, cli, copy_sample_harness_layer, handle_mail, local_mail};
 use serde_json::{Value, json};
-use std::{fs, os::unix::fs::symlink, path::Path, process::Stdio};
+use std::{fs, os::unix::fs::symlink, path::Path};
 
 #[test]
 fn complete_project_sample_renders_when_copied_to_the_active_name() {
@@ -382,7 +382,8 @@ fn external_references_merge_before_resolution_and_are_hidden_in_preview() {
                 "args": ["-c", r#"test "${AGENTS_TEST_REFERENCE-unset}" = unset &&
                     test "$1" = 'env-value' && test "$2" = "$(printf 'file-value\n.')" && printf ok"#,
                     "test", "{{ mcp.tool.env.TOKEN }}", "{{ mcp.tool.env.FILE }}."]
-            }}
+            }},
+            "mail": local_mail()
         })
         .to_string(),
     )
@@ -409,7 +410,7 @@ fn external_references_merge_before_resolution_and_are_hidden_in_preview() {
     let preview: Value = serde_json::from_str(&stdout).unwrap();
     assert_eq!(preview["redacted"], true);
 
-    let output = command().arg("run").stdin(Stdio::null()).output().unwrap();
+    let output = handle_mail(command, "test", "Check values.");
     assert!(
         output.status.success(),
         "{}",

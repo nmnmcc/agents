@@ -5,6 +5,24 @@ Run project agents with existing harness CLIs. Let them talk by email.
 **Just use mail.** An agent has an address, not an RPC endpoint. A request
 can wait in an inbox; a human can join the same thread from a mail client.
 Use To, Cc, Bcc, and replies instead of inventing a coordination protocol.
+The only way to give an agent work is to mail it: every run starts from one
+message in its inbox.
+
+## Install with Nix
+
+With `nix-command` and `flakes` enabled:
+
+```sh
+nix profile install github:nmnmcc/agents
+```
+
+To try it without installing, run `nix run github:nmnmcc/agents -- --help`.
+From a local checkout, use `nix profile install path:.` to install or
+`nix build path:.` to build `result/bin/agents`.
+The same package is available through `devenv build outputs.agents`.
+Linux builds link statically against musl. macOS builds link third-party
+libraries statically and still use the system libraries and frameworks.
+Install and authenticate the harness CLIs you plan to use separately.
 
 ## Watch a project's mail
 
@@ -14,9 +32,10 @@ agents
 ```
 
 With no arguments, `agents` runs in the foreground. It flushes outgoing mail
-and starts each recipient agent when its inbox has unread mail at startup
-or new unread mail arrives. It runs one agent at a time. Stop it with
-`Ctrl-C`. Set up [mail addresses](#exchange-mail-locally) and install and
+and runs the recipient agent once for each message that is unread at startup
+or arrives unread later. It runs one agent at a time. Stop it with `Ctrl-C`.
+`agents --once` makes a single such pass and exits, failing if any delivery
+or run failed; use it from scripts or a scheduler. Set up [mail addresses](#exchange-mail-locally) and install and
 authenticate the harnesses your agents use.
 
 An unchanged unread message does not trigger repeated runs in the same
@@ -32,14 +51,15 @@ harness keeps the session itself. Replies to mail sent by the agent's
 messages, not native session IDs, and a session link is scoped to an
 authenticated participant.
 
-The watcher requires a session-capable adapter. `agents` supplies a session
-ID and treats every harness the same way; each difference lives in its
-adapter. The Claude Code, Codex, and OpenCode V2 samples are all
+Sessions need a session-capable adapter; without one, every message starts
+a fresh run, and the thread itself is the only context. `agents` supplies a
+session ID and treats every harness the same way; each difference lives in
+its adapter. The Claude Code, Codex, and OpenCode V2 samples are all
 session-capable. Codex assigns its own thread ID, so its adapter declares
 `sessions: reported` and a `stdout` hook reads the ID from the JSON event
 stream. OpenCode would start a new session for an unknown ID, so its adapter
-checks with a `before` hook before resuming. If an existing session cannot be resumed, the run fails rather
-than starting a new one.
+checks with a `before` hook before resuming. If an existing session cannot be
+resumed, the run fails rather than starting a new one.
 
 ### Run it as a user service
 
@@ -62,7 +82,7 @@ the service can find the harness (or configure an absolute `program`
 path) and access its credentials. The generated definition does not copy
 shell variables or secrets.
 
-## Run a task without mail
+## Check a project
 
 From this repository:
 
@@ -70,17 +90,13 @@ From this repository:
 cargo install --locked --path crates/agents
 agents config check samples/project
 agents config render samples/project
-printf '%s\n' 'Review this project for missing tests.' |
-  agents run samples/project
 ```
 
-`run` reads the task from stdin, forwards the harness's stdout and stderr,
-and returns its exit status. Only `run` needs an installed and authenticated
-harness. The example uses
-Claude Code; change the agent's `harness` to `codex` or `opencode` to use
-another. `config render` previews the command and temporary files as JSON
-without launching the harness. In your own project, omit the directory to
-use the current one; pass `--agent ID` to override the default.
+`config render` previews the harness command and temporary files as JSON
+without launching the harness, which needs no installation or login. The
+sample uses Claude Code; change an agent's `harness` to `codex` or
+`opencode` to use another. In your own project, omit the directory to use
+the current one.
 
 ## Exchange mail locally
 
@@ -100,13 +116,12 @@ printf '%s\n' 'Please review commit abc123.' |
   agents mail send --agent builder --to reviewer --subject 'Review abc123'
 agents mail flush
 agents mail list --agent reviewer --unread-only
-printf '%s\n' 'Review the unread request in your inbox.' |
-  agents run --agent reviewer
+agents --once
 ```
 
-`send` queues a message; the foreground service delivers it and starts the
-recipient. The example above shows manual delivery and a one-off run
-instead. Local mail is stored in `.agents/mail/inbox.mbox` and
+`send` queues a message; the watcher delivers it and runs the recipient.
+The example above does the same by hand: `flush` delivers, and
+`agents --once` runs `reviewer` on its unread request. Local mail is stored in `.agents/mail/inbox.mbox` and
 `.agents/mail/outbox.mbox`; keep their index and flag sidecars with them.
 Set `mail.directory` to use another private directory.
 
@@ -130,9 +145,9 @@ The CLI returns JSON for mailbox queries and works without a harness.
 Use `--directory` to select a different project. `agents mail --help` lists
 all operations, including `get`, `attachment`, and `set-read`.
 
-On any run, a mail-enabled agent gets a short unread summary as
-untrusted context, separate from the task. The per-run `agents-mail` MCP
-server provides the same mailbox operations: list, search, get, thread,
+Each run gives the agent its triggering message as untrusted data and asks
+it to handle the message as its role requires, reply when appropriate, and
+mark it read. The per-run `agents-mail` MCP server provides the same mailbox operations: list, search, get, thread,
 attachment, read state, send, and reply. Reading does not mark mail read.
 
 Repeat `--to`, `--cc`, or `--bcc` for multiple recipients. Replies preserve
@@ -140,19 +155,6 @@ the thread and use `Reply-To` before `From`, subject to authorization.
 `--all` also includes visible To/Cc recipients, excluding self and
 duplicates; it never restores Bcc. Blind recipients do not appear in
 delivered headers.
-
-## Use a saved message as a task
-
-Inspect a saved RFC 5322 message before deciding whether to run it. Supply
-the envelope recipient separately; the `To` header does not select the agent.
-
-```sh
-agents mail inspect --recipient reviewer@example.test < request.eml
-agents mail run --recipient reviewer@example.test < request.eml
-```
-
-`inspect` shows the selected agent and decoded plain-text task. Run the
-second command only after approving that text as a task. It does not reply.
 
 ## Exchange mail with people
 
@@ -163,7 +165,8 @@ external storage. See the [mail sample](samples/mail.agents.json) for SMTP.
 For IMAP, use a dedicated inbox and private outbox; the outbox must support
 permanent custom keywords.
 
-With local storage, have a trusted gateway deposit incoming mail:
+With local storage, have a trusted gateway deposit incoming mail. This is
+also how a person on the same machine hands an agent a saved message:
 
 ```sh
 agents mail deliver --recipient reviewer@example.test \
@@ -236,6 +239,36 @@ cargo run --locked -q -p agents -- config schema > agents.schema.json
   values. Relative file paths start at the project root. Render previews
   withhold plans containing resolved references.
 
+### MCP servers
+
+Put server entries from an `mcpServers` block directly under `mcp` in the
+project config:
+
+```yaml
+mcp:
+  local-tools:
+    command: npx
+    args: [-y, example-mcp-server]
+    env: { LOG_LEVEL: info }
+  remote-tools:
+    type: streamable-http
+    url: https://mcp.example.test/mcp
+    headers:
+      Authorization: { env: MCP_AUTHORIZATION }
+```
+
+For local servers, `type: stdio` is optional. For remote servers, specify
+`type: http` (also accepted as `streamable-http`), `sse` (legacy), or
+`ws` (WebSocket). Remote headers may use external string references, as in
+the example, where `MCP_AUTHORIZATION` contains the entire header value.
+
+The sample adapters all support stdio and Streamable HTTP. The Claude Code
+adapter also supports SSE and WebSocket. The Codex and OpenCode adapters
+support an optional stdio `cwd`; the Claude Code adapter rejects it.
+Unsupported transports fail during plan rendering, before starting the harness.
+
+### Harness adapters
+
 Harness adapters are project configuration, not separate installations.
 Each defines a program, arguments, capabilities, and any temporary files.
 Arguments are rendered individually, without a shell. Arguments,
@@ -249,8 +282,11 @@ MiniJinja string or `{ "js": "..." }`. JavaScript runs in a fresh QuickJS
 context with no I/O and with memory, stack, and time limits. The template
 context is available as global variables, and the value of the last statement
 is the result. An argument script may return an array of arguments or `null`
-for none, which is how optional arguments are written; an environment script may return `null` to remove the variable; a
-`json` file script may return any JSON value.
+for none, which is how optional arguments are written. An environment variable
+script may return `null` to remove the variable; `env` itself may also be a
+script that returns the whole map, which the sample Codex adapter uses to keep
+HTTP header values out of its arguments. A `json` file script may return any
+JSON value.
 
 ```yaml
 env:
@@ -298,8 +334,8 @@ Source layout, under `crates/agents/src/`:
   values.
 - `mail/`: mailboxes (local mbox or IMAP), the outbox and its retries, native
   session bindings, and the per-run `agents-mail` MCP bridge.
-- `daemon.rs`: the default command; polls mail and calls the same runner as
-  `agents run`.
+- `daemon.rs`: the default command; flushes the outbox and runs each agent on
+  its unread mail, continuously or `--once`.
 - `service.rs`: user service definitions for systemd and launchd.
 - `types.rs`: validated string types shared by all of the above.
 

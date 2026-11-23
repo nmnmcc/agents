@@ -56,9 +56,10 @@ impl ValueSource {
 }
 
 pub fn is_reference(object: &Map<String, Value>, path: &[String]) -> bool {
-    let env_map = matches!(path, [registry, _, env]
-        if matches!(registry.as_str(), "mcp" | "harnesses") && env == "env");
-    !env_map
+    let string_map = matches!(path, [registry, _, field]
+        if (matches!(registry.as_str(), "mcp" | "harnesses") && field == "env")
+            || (registry == "mcp" && field == "headers"));
+    !string_map
         && object.len() == 1
         && ["env", "file"]
             .iter()

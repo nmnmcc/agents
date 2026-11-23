@@ -1,4 +1,4 @@
-use super::{LocatedProject, Project, Workspace};
+use super::{LocatedProject, Workspace};
 use crate::{
     mail::MailConfig,
     template::{Renderer, Template},
@@ -69,10 +69,6 @@ impl MailRoutes {
                 address: &mailbox.address,
             })
             .collect()
-    }
-
-    pub fn identity(&self, project: &Project) -> Option<&AgentMailbox> {
-        self.agent(&project.root, &project.agent.id)
     }
 
     fn agent(&self, root: &Path, agent: &Id) -> Option<&AgentMailbox> {
@@ -301,14 +297,5 @@ impl Workspace {
             .with_context(|| format!("no mail address configured for agent {agent}"))?
             .clone();
         Ok((routes, mailbox))
-    }
-
-    pub fn project_for_run(&self, agent: Option<&Id>) -> Result<(Project, Option<MailRoutes>)> {
-        let project = self.project(agent)?;
-        let config = &self.selected.config;
-        let has_identity =
-            config.mail.address.is_some() || config.agents[&project.agent.id].mail.is_some();
-        let routes = has_identity.then(|| self.mail_routes()).transpose()?;
-        Ok((project, routes))
     }
 }

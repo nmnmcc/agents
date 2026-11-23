@@ -1,15 +1,43 @@
 use serde_json::{Value, json};
 use std::{
     fs,
+    io::Write,
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Output, Stdio},
 };
 
 pub(super) fn cli(directory: &Path) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_agents"));
     command.current_dir(directory);
     command
+}
+
+/// The mail settings `handle_mail` expects: local addresses and a trusted human sender.
+pub(super) fn local_mail() -> Value {
+    json!({"address": "{{ agent.id }}@example.test", "trust": ["human@example.test"]})
+}
+
+/// Delivers `body` from the trusted human to `agent`, then makes one watcher pass.
+pub(super) fn handle_mail(command: impl Fn() -> Command, agent: &str, body: &str) -> Output {
+    let mut deliver = command()
+        .args(["mail", "deliver", "--recipient"])
+        .arg(format!("{agent}@example.test"))
+        .args(["--authenticated-from", "human@example.test"])
+        .stdin(Stdio::piped())
+        .spawn()
+        .unwrap();
+    write!(
+        deliver.stdin.take().unwrap(),
+        "From: human@example.test\r\nSubject: Task\r\n\r\n{body}\r\n"
+    )
+    .unwrap();
+    assert!(deliver.wait().unwrap().success());
+    command()
+        .arg("--once")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap()
 }
 
 pub(super) fn sample_project() -> PathBuf {
@@ -90,8 +118,14 @@ exit 23
             root,
             _dir: dir,
         };
+        fixture.project["mail"] = local_mail();
         fixture.save();
         fixture
+    }
+
+    /// Delivers `body` to `agent` and makes one watcher pass.
+    pub(super) fn handle_mail(&self, agent: &str, body: &str) -> Output {
+        handle_mail(|| self.command(), agent, body)
     }
 
     pub(super) fn save(&mut self) {

@@ -258,78 +258,6 @@ printf '\nfinished builder %s %s\n' "$id" "$resume"
 }
 
 #[test]
-fn manual_mail_uses_only_registered_envelope_and_plain_text() {
-    let mut fixture = Fixture::new();
-    fixture.project["agents"]["reviewer"]["mail"] = json!({"address":"agents+review@example.test"});
-    fixture.save();
-    let recipient = "agents+review@EXAMPLE.TEST";
-
-    let mail = concat!(
-        "From: Untrusted <forged@example.test>\r\n",
-        "To: agents+wrong@example.test\r\n",
-        "Delivered-To: agents+wrong@example.test\r\n",
-        "Message-ID: <example@example.test>\r\n",
-        "Subject: Review request\r\n",
-        "MIME-Version: 1.0\r\n",
-        "Content-Type: multipart/mixed; boundary=fixture\r\n\r\n",
-        "--fixture\r\nContent-Type: text/plain; charset=utf-8\r\n",
-        "Content-Transfer-Encoding: quoted-printable\r\n\r\n",
-        "Caf=C3=A9 and {{ task }}\r\n",
-        "--fixture\r\nContent-Type: text/plain\r\n",
-        "Content-Disposition: attachment; filename=other.txt\r\n\r\n",
-        "Not task text\r\n--fixture--\r\n",
-    );
-    let process = |verb: &str, recipient: &str, mail: &str| {
-        let mut child = fixture
-            .command()
-            .args(["mail", verb, "--recipient", recipient])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
-        let _ = child.stdin.take().unwrap().write_all(mail.as_bytes());
-        child.wait_with_output().unwrap()
-    };
-    let inspected = process("inspect", recipient, mail);
-    assert!(
-        inspected.status.success(),
-        "{}",
-        String::from_utf8_lossy(&inspected.stderr)
-    );
-    let preview: Value = serde_json::from_slice(&inspected.stdout).unwrap();
-    assert_eq!(
-        preview["project"],
-        json!(fixture.root.canonicalize().unwrap())
-    );
-    assert_eq!(preview["agent"], "reviewer");
-    assert_eq!(preview["subject"], "Review request");
-    assert_eq!(preview["body"], "Café and {{ task }}");
-
-    let unknown = process("inspect", "agents+wrong@example.test", mail);
-    assert!(!unknown.status.success());
-    assert!(String::from_utf8_lossy(&unknown.stderr).contains("no agent registered"));
-    let html_only = process(
-        "inspect",
-        recipient,
-        "Content-Type: text/html\r\n\r\n<p>Not a task</p>",
-    );
-    assert!(!html_only.status.success());
-    assert!(String::from_utf8_lossy(&html_only.stderr).contains("no nonempty text/plain body"));
-
-    let executed = process("run", recipient, mail);
-    assert_eq!(
-        executed.status.code(),
-        Some(23),
-        "{}",
-        String::from_utf8_lossy(&executed.stderr)
-    );
-    assert!(
-        String::from_utf8_lossy(&executed.stdout).ends_with("\nUser task:\nCafé and {{ task }}")
-    );
-}
-
-#[test]
 fn local_mbox_delivers_reads_filters_and_replies_without_a_server() {
     let mut fixture = Fixture::new();
     fixture.project["mail"] = json!({
@@ -510,7 +438,7 @@ fn mail_address_cannot_select_multiple_agents() {
     fixture.save();
     let output = fixture
         .command()
-        .args(["mail", "inspect", "--recipient", "shared@example.test"])
+        .args(["mail", "addresses"])
         .output()
         .unwrap();
     assert!(!output.status.success());

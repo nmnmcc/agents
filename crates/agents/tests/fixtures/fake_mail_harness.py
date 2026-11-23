@@ -8,8 +8,10 @@ import sys
 
 def main():
     assert "AGENTS_SMOKE_IMAP" not in os.environ
-    prompt = sys.stdin.read()
-    assert "Recent unread mail follows." in prompt
+    header, payload = sys.stdin.read().split("\n", 1)
+    assert header.startswith("The new message in your inbox follows."), header
+    trigger = json.loads(payload)
+    body = trigger["body"]
     agent = sys.argv[1]
     servers = json.loads(sys.argv[2])
     server = servers["agents-mail"]
@@ -60,11 +62,11 @@ def main():
             "set_mail_read",
         } <= tools
         if agent == "build":
-            if "Inspect inbox." in prompt:
-                assert "fulltext-payload" in prompt and "private-reviewer" not in prompt
+            if "fulltext-payload" in body:
                 result = call(3, "search_mail", {"query": "fulltext-payload"})
                 assert len(result["messages"]) == 1
                 mail = result["messages"][0]["mail"]
+                assert mail == trigger["message"]["mail"]
                 full = call(4, "get_mail", mail)
                 assert "评审" in full["body"]
                 assert full["attachments"][0]["name"] == "notes.txt"
@@ -97,7 +99,7 @@ def main():
                 },
                 error=True,
             )
-            if "MCP reply." in prompt:
+            if "MCP reply." in body:
                 mail = call(14, "search_mail", {"query": "fulltext-payload"})[
                     "messages"
                 ][0]["mail"]
@@ -120,11 +122,10 @@ def main():
                     },
                 )["queued"]
             print("built")
-        else:
-            assert agent == "review"
-            assert "Please review" in prompt and "fulltext-payload" not in prompt
+        elif agent == "review" and "Please review" in body:
             assert call(3, "search_mail", {"query": "Please review"})["messages"]
             print("reviewed")
+        call(16, "set_mail_read", {"mail": trigger["message"]["mail"], "read": True})
         client.stdin.close()
         assert client.wait(timeout=5) == 0
 

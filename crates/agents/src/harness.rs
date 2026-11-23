@@ -21,9 +21,8 @@ use std::{
 pub struct Harness {
     program: Program,
     args: Vec<Template>,
-    /// Child-only environment overrides; null removes an inherited value.
     #[serde(default)]
-    env: BTreeMap<EnvName, Option<Template>>,
+    env: Env,
     #[serde(default)]
     capabilities: Capabilities,
     #[serde(default)]
@@ -32,6 +31,60 @@ pub struct Harness {
     stdin: Option<Template>,
     #[serde(default)]
     hooks: Hooks,
+}
+
+/// Child-only environment overrides: a map whose `null` values remove inherited
+/// variables, or a script that returns such a map.
+#[derive(Clone, Deserialize, JsonSchema)]
+#[serde(untagged)]
+enum Env {
+    Js(Script),
+    Variables(BTreeMap<EnvName, Option<Template>>),
+}
+
+impl Default for Env {
+    fn default() -> Self {
+        Self::Variables(BTreeMap::new())
+    }
+}
+
+impl Env {
+    fn render(&self, renderer: &Renderer) -> Result<BTreeMap<EnvName, Option<String>>> {
+        let variables = match self {
+            Self::Js(script) => {
+                let value = renderer.script(script).context("render env")?;
+                serde_json::from_value::<BTreeMap<EnvName, Option<String>>>(value).context(
+                    "env script must return an object mapping variable names to strings or null",
+                )?
+            }
+            Self::Variables(templates) => templates
+                .iter()
+                .map(|(name, template)| {
+                    let value = match template {
+                        None => None,
+                        Some(template) => match renderer.value(template) {
+                            Ok(Value::Null) => None,
+                            Ok(Value::String(value)) => Some(value),
+                            Ok(other) => bail!(
+                                "render environment variable {name}: expected a string or null, got {other}"
+                            ),
+                            Err(error) => {
+                                return Err(error.context(format!("render environment variable {name}")));
+                            }
+                        },
+                    };
+                    Ok((name.clone(), value))
+                })
+                .collect::<Result<_>>()?,
+        };
+        for (name, value) in &variables {
+            ensure!(
+                value.as_ref().is_none_or(|value| !value.contains('\0')),
+                "environment variable {name} contains a NUL byte"
+            );
+        }
+        Ok(variables)
+    }
 }
 
 impl Harness {
@@ -258,26 +311,7 @@ impl Plan {
                     .with_context(|| format!("render hooks.before[{index}]"))
             })
             .collect::<Result<Vec<_>>>()?;
-        let mut child_env = BTreeMap::new();
-        for (name, template) in &harness.env {
-            let value = (|| -> Result<Option<String>> {
-                let value = match template {
-                    None => None,
-                    Some(template) => match renderer.value(template)? {
-                        Value::Null => None,
-                        Value::String(value) => Some(value),
-                        other => bail!("expected a string or null, got {other}"),
-                    },
-                };
-                ensure!(
-                    value.as_ref().is_none_or(|value| !value.contains('\0')),
-                    "contains a NUL byte"
-                );
-                Ok(value)
-            })()
-            .with_context(|| format!("render child environment variable {name}"))?;
-            child_env.insert(name.clone(), value);
-        }
+        let child_env = harness.env.render(&renderer)?;
         Ok(Self {
             cwd: project.root.clone(),
             program: harness.program.clone(),
