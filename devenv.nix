@@ -26,6 +26,10 @@ let
         *) target_arg= ;;
       esac
     done
+    # pkgsStatic sets NIX_CFLAGS_LINK=-static for the musl target, but the GNU
+    # cc wrapper reads it too. Linking a proc-macro with -static -shared pulls
+    # in the non-PIC crtbeginT.o, which rust-lld rejects on x86_64.
+    unset NIX_CFLAGS_LINK
     exec "$rustc" "$@" \
       -C linker=${pkgs.stdenv.cc}/bin/cc \
       -C link-arg=-Wl,--dynamic-linker=${pkgs.stdenv.cc.bintools.dynamicLinker} \
