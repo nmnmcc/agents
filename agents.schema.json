@@ -643,6 +643,17 @@
         "endpoint": {
           "$ref": "#/$defs/Endpoint"
         },
+        "from": {
+          "description": "Shared SMTP From and envelope sender. Defaults to the sending agent's\naddress. When they differ, the agent's address is used as Reply-To.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MailAddress"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "login": {
           "anyOf": [
             {
@@ -1607,7 +1618,7 @@
                       ]
                     },
                     "signing": {
-                      "description": "Private signing identity indexed by the agent email address.",
+                      "description": "Private signing identity indexed by agent address, with the shared SMTP\nFrom address as a fallback.",
                       "type": "object",
                       "additionalProperties": {
                         "anyOf": [
@@ -1844,6 +1855,24 @@
                         }
                       },
                       "additionalProperties": false
+                    },
+                    "from": {
+                      "anyOf": [
+                        {
+                          "description": "Shared SMTP From and envelope sender. Defaults to the sending agent's\naddress. When they differ, the agent's address is used as Reply-To.",
+                          "type": [
+                            "string",
+                            "null"
+                          ],
+                          "format": "email"
+                        },
+                        {
+                          "$ref": "#/$defs/EnvReference"
+                        },
+                        {
+                          "$ref": "#/$defs/FileReference"
+                        }
+                      ]
                     },
                     "login": {
                       "type": [
@@ -2487,7 +2516,7 @@
           ]
         },
         "signing": {
-          "description": "Private signing identity indexed by the agent email address.",
+          "description": "Private signing identity indexed by agent address, with the shared SMTP\nFrom address as a fallback.",
           "type": "object",
           "additionalProperties": {
             "$ref": "#/$defs/Signing"

@@ -20,7 +20,9 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
+BUILD_SMTP = "agents@example.test"
 BUILDER = "agents+build@example.test"
+EDITOR = "agents+edit@example.test"
 REVIEWER = "review@example.test"
 HUMAN = "human@example.test"
 
@@ -47,7 +49,7 @@ def credentials(root):
     home.mkdir(mode=0o700)
     gpg = ("gpg", "--batch", "--homedir", home)
     identities = {}
-    for address in (HUMAN, REVIEWER):
+    for address in (HUMAN, REVIEWER, BUILD_SMTP):
         command(
             *gpg,
             "--pinentry-mode",
@@ -87,7 +89,8 @@ def credentials(root):
             "-days",
             "2",
             "-subj",
-            f"/CN=Fixture/emailAddress={address}",
+            # "+" separates multi-valued RDNs in -subj; escape it in +tag addresses.
+            "/CN=Fixture/emailAddress=" + address.replace("+", "\\+"),
             "-keyout",
             key,
             "-out",
@@ -254,7 +257,10 @@ class Smtp(socketserver.StreamRequestHandler):
                     self.wfile.write(b"250 loopback\r\n")
                 case b"MAIL":
                     sender = re.search(rb"<([^<>]+)>", line)[1].decode()
-                    self.wfile.write(b"250 OK\r\n")
+                    if sender in (BUILD_SMTP, REVIEWER):
+                        self.wfile.write(b"250 OK\r\n")
+                    else:
+                        self.wfile.write(b"553 sender is not authorized\r\n")
                 case b"RCPT":
                     recipient = re.search(rb"<([^<>]+)>", line)[1].decode()
                     self.wfile.write(b"250 OK\r\n")
@@ -308,6 +314,16 @@ def test(binary, imap_port):
             [*trusted, (REVIEWER, keys[REVIEWER])],
             keys[f"{BUILDER}/smime"],
         )
+        config = json.loads(build.read_text())
+        config["agents"]["edit"] = {
+            **config["agents"]["build"],
+            "mail": {"address": EDITOR},
+        }
+        config["mail"]["transport"]["smtp"]["from"] = BUILD_SMTP
+        config["mail"]["transport"]["signatures"]["signing"][BUILD_SMTP] = keys[
+            BUILD_SMTP
+        ]
+        build.write_text(json.dumps(config))
         review = project(
             root / "reviewer",
             "review",
@@ -430,7 +446,9 @@ def test(binary, imap_port):
             (followup,) = search(build, "Detached S/MIME")
             mail(build, "reply", *reference(followup), task=b"CLI reply")
             mail(build, "flush")
-            assert smtp.sent[-1][:2] == (BUILDER, HUMAN)
+            assert smtp.sent[-1][:2] == (BUILD_SMTP, HUMAN)
+            assert smtp.sent[-1][2]["From"] == BUILD_SMTP
+            assert smtp.sent[-1][2]["Reply-To"] == BUILDER
             assert smtp.sent[-1][2]["In-Reply-To"] == "<smime@example.test>"
 
             mail(
@@ -448,13 +466,16 @@ def test(binary, imap_port):
             time.sleep(2.2)
             mail(build, "flush")
             first, duplicate = smtp.sent[-2:]
-            assert first[:2] == duplicate[:2] == (BUILDER, REVIEWER)
+            assert first[:2] == duplicate[:2] == (BUILD_SMTP, REVIEWER)
             assert first[2]["Message-ID"] == duplicate[2]["Message-ID"]
             assert duplicate[2].get_content_type() == "application/pkcs7-mime"
             assert cli(review, "--once").stdout.count(b"handled") == 1
             (reviewed,) = search(review, "Handle on review")
             mail(review, "reply", *reference(reviewed), task=b"Back from review")
             mail(review, "flush")
+            assert smtp.sent[-1][:2] == (REVIEWER, BUILDER)
+            assert smtp.sent[-1][2]["From"] == REVIEWER
+            assert smtp.sent[-1][2]["Reply-To"] is None
             assert cli(build, "--once").stdout.count(b"handled") == 1
             (reply,) = search(build, "Back from review")
             assert reply["from"] == REVIEWER
@@ -470,7 +491,7 @@ def test(binary, imap_port):
             assert not anonymous["authenticated"] and anonymous["from"] == HUMAN
             mail(build, "reply", *reference(anonymous), task=b"Reply to unsigned task")
             mail(build, "flush")
-            assert smtp.sent[-1][:2] == (BUILDER, HUMAN)
+            assert smtp.sent[-1][:2] == (BUILD_SMTP, HUMAN)
             assert smtp.sent[-1][2]["In-Reply-To"] == "<unsigned@example.test>"
             assert not cli(build, "--once").stdout
             mail(
@@ -491,6 +512,57 @@ def test(binary, imap_port):
             build.write_text(json.dumps(configuration))
             assert not search(build, "Anonymous task")
             assert not cli(build, "--once").stdout
+
+            editor_task = signed(
+                job(EDITOR, "edit", "Please acknowledge this task"), keys[HUMAN]
+            ).replace(b"To: wrong@example.test", b"To: " + EDITOR.encode(), 1)
+            append(imap_port, "build", editor_task)
+            started = cli(build, "--once").stdout.strip().split()
+            assert started[0] == b"handled" and started[2] == b"start"
+            assert not search(build, "Please acknowledge this task")
+            mail(build, "flush")
+            sender, recipient, outbound = smtp.sent[-1]
+            assert (sender, recipient) == (BUILD_SMTP, HUMAN)
+            assert outbound["From"] == BUILD_SMTP
+            assert outbound["Reply-To"] == EDITOR
+            cleartext = command(
+                "gpg",
+                "--batch",
+                "--homedir",
+                keys[BUILD_SMTP]["home"],
+                "--decrypt",
+                task=outbound.get_content().encode(),
+            )
+            assert f"Agent-To: {HUMAN}".encode() in cleartext
+            assert b"Task acknowledged" in cleartext
+
+            parent = outbound["Message-ID"]
+            follow_up = signed(
+                job(
+                    EDITOR,
+                    "edit-follow-up",
+                    "Thanks for your reply",
+                    f"In-Reply-To: {parent}\r\n",
+                ),
+                keys[HUMAN],
+            ).replace(b"To: wrong@example.test", b"To: " + EDITOR.encode(), 1)
+            append(imap_port, "build", follow_up)
+            assert cli(build, "--once").stdout.strip().split() == [
+                b"handled",
+                started[1],
+                b"resume",
+            ]
+
+            sent_count = len(smtp.sent)
+            mail(
+                build, "send", "--to", "edit", "--subject", "Local", task=b"Local task"
+            )
+            mail(build, "flush")
+            assert len(smtp.sent) == sent_count
+            (local,) = json.loads(
+                mail(build, "search", "--agent", "edit", "Local task").stdout
+            )["messages"]
+            assert local["from"] == BUILDER
         finally:
             smtp.shutdown()
             thread.join()

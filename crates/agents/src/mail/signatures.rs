@@ -20,7 +20,8 @@ pub(super) struct Signatures {
     openpgp_keyring: Option<PathBuf>,
     #[serde(default)]
     trusted: Vec<Trusted>,
-    /// Private signing identity indexed by the agent email address.
+    /// Private signing identity indexed by agent address, with the shared SMTP
+    /// From address as a fallback.
     #[serde(default)]
     signing: BTreeMap<MailAddress, Signing>,
 }
@@ -321,17 +322,23 @@ impl Signatures {
     pub fn sign(
         &self,
         root: &Path,
+        agent: &MailAddress,
         from: &MailAddress,
         to: &MailAddress,
         id: &str,
         raw: &[u8],
     ) -> Result<Vec<u8>> {
-        let signing = self
-            .signing
-            .iter()
-            .find(|(address, _)| address.matches(from))
-            .map(|(_, signing)| signing)
-            .with_context(|| format!("no SMTP signing identity configured for {from}"))?;
+        let identity = |address: &MailAddress| {
+            self.signing
+                .iter()
+                .find(|(key, _)| key.matches(address))
+                .map(|(_, signing)| signing)
+        };
+        let signing = identity(agent)
+            .or_else(|| identity(from))
+            .with_context(|| {
+                format!("no SMTP signing identity configured for {agent} or {from}")
+            })?;
         let message = MessageParser::default()
             .parse(raw)
             .context("invalid queued mail")?;
@@ -406,18 +413,14 @@ impl Signatures {
                 result.stdout
             }
         };
-        let mut wire = Vec::new();
+        let mut wire = format!("From: {from}\r\n").into_bytes();
+        if !agent.matches(from) {
+            wire.extend_from_slice(format!("Reply-To: {agent}\r\n").as_bytes());
+        }
         for (name, value) in message.headers_raw() {
             if matches!(
                 name.to_ascii_lowercase().as_str(),
-                "from"
-                    | "to"
-                    | "cc"
-                    | "subject"
-                    | "date"
-                    | "message-id"
-                    | "in-reply-to"
-                    | "references"
+                "to" | "cc" | "subject" | "date" | "message-id" | "in-reply-to" | "references"
             ) {
                 wire.extend_from_slice(format!("{name}: {}", value.trim_start()).as_bytes());
                 if !wire.ends_with(b"\n") {
