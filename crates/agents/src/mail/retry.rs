@@ -17,6 +17,10 @@ const fn lifetime_default() -> u64 {
     5 * 24 * 60 * 60
 }
 
+const fn retain_default() -> u64 {
+    7 * 24 * 60 * 60
+}
+
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Policy {
@@ -28,6 +32,9 @@ pub struct Policy {
     pub maximal_backoff_time: u64,
     #[serde(default = "lifetime_default")]
     pub maximal_queue_lifetime: u64,
+    /// Seconds to keep sent, failed, and expired outbox records. 0 keeps them forever.
+    #[serde(default = "retain_default")]
+    pub retain: u64,
 }
 
 impl Default for Policy {
@@ -36,6 +43,7 @@ impl Default for Policy {
             minimal_backoff_time: min_default(),
             maximal_backoff_time: max_default(),
             maximal_queue_lifetime: lifetime_default(),
+            retain: retain_default(),
         }
     }
 }

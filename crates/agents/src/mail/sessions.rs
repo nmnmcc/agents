@@ -7,7 +7,6 @@ use std::{
     fs,
     path::{Path, PathBuf},
     sync::{Condvar, Mutex},
-    time::Duration,
 };
 use uuid::Uuid;
 
@@ -51,14 +50,11 @@ impl SessionId {
         }
     }
 
+    /// Waits until the harness reports its session ID or exits.
     pub fn get(&self) -> Result<String> {
-        let (state, _) = self
+        let state = self
             .changed
-            .wait_timeout_while(
-                self.observed.lock().unwrap(),
-                Duration::from_secs(5),
-                |state| state.is_none(),
-            )
+            .wait_while(self.observed.lock().unwrap(), |state| state.is_none())
             .unwrap();
         state
             .as_ref()

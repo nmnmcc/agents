@@ -10,10 +10,16 @@ use std::{
     ffi::OsStr,
     fs,
     io::{self, BufRead, BufReader, Read, Seek, Write},
+    os::unix::process::CommandExt,
     path::{Path, PathBuf},
     process::{Command, ExitStatus, Stdio},
-    sync::OnceLock,
+    sync::{
+        OnceLock,
+        atomic::{AtomicBool, Ordering},
+        mpsc::{self, RecvTimeoutError},
+    },
     thread,
+    time::Duration,
 };
 
 #[derive(Clone, Deserialize, JsonSchema)]
@@ -333,11 +339,13 @@ impl Plan {
     }
 
     /// Runs the hooks and the harness; `observe` receives a reported native session ID.
+    /// The harness and its descendants are killed after `timeout`.
     pub fn execute(
         self,
         run_dir: &Path,
         mut task_input: impl Read,
         secrets: &[&EnvName],
+        timeout: Duration,
         observe: impl Fn(String) + Sync,
     ) -> Result<ExitStatus> {
         for (name, content) in &self.files {
@@ -359,7 +367,8 @@ impl Plan {
                 .with_context(|| format!("hooks.before[{index}]"))?;
         }
         let mut command = self.command(&self.program, &self.args, secrets);
-        command.stdin(input);
+        // A process group lets the timeout reach tools the harness started.
+        command.stdin(input).process_group(0);
         if self.hooks.stdout.is_some() {
             command.stdout(Stdio::piped());
         }
@@ -391,7 +400,17 @@ impl Plan {
                 self.hooks.stderr.as_ref(),
             ),
         ];
-        let relayed = thread::scope(|scope| {
+        let group = libc::pid_t::try_from(child.id()).context("harness process ID")?;
+        let (finished, watch) = mpsc::channel::<()>();
+        let timed_out = AtomicBool::new(false);
+        let (relayed, status) = thread::scope(|scope| {
+            let timed_out = &timed_out;
+            scope.spawn(move || {
+                if watch.recv_timeout(timeout) == Err(RecvTimeoutError::Timeout) {
+                    timed_out.store(true, Ordering::Relaxed);
+                    kill_group(group);
+                }
+            });
             let workers = streams
                 .into_iter()
                 .filter_map(|(stream, pipe, script)| Some((stream, pipe?, script?)))
@@ -404,14 +423,20 @@ impl Plan {
                     })
                 })
                 .collect::<Vec<_>>();
-            workers
+            let relayed = workers
                 .into_iter()
-                .try_for_each(|worker| worker.join().expect("output hook panicked"))
+                .try_for_each(|worker| worker.join().expect("output hook panicked"));
+            if relayed.is_err() {
+                kill_group(group);
+            }
+            let status = child.wait().context("wait for harness");
+            drop(finished);
+            (relayed, status)
         });
-        if relayed.is_err() {
-            let _ = child.kill();
+        let status = status?;
+        if timed_out.load(Ordering::Relaxed) {
+            eprintln!("agents: harness timed out after {}s", timeout.as_secs());
         }
-        let status = child.wait().context("wait for harness")?;
         relayed?;
         if !self.hooks.after.is_empty() {
             let mut context = self.context.clone();
@@ -467,6 +492,13 @@ impl Plan {
 
 /// Copies one output stream through `script`, line by line, in a scope that
 /// keeps state for the whole run.
+fn kill_group(group: libc::pid_t) {
+    // SAFETY: kill(2) has no memory-safety preconditions.
+    unsafe {
+        libc::kill(-group, libc::SIGKILL);
+    }
+}
+
 fn relay(
     stream: &str,
     pipe: impl Read,

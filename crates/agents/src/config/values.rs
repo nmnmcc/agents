@@ -70,6 +70,8 @@ pub fn is_reference(object: &Map<String, Value>, path: &[String]) -> bool {
 pub struct References {
     pub used: bool,
     pub env: BTreeSet<EnvName>,
+    /// Referenced files, watched for configuration reloads.
+    pub files: BTreeSet<PathBuf>,
 }
 
 impl References {
@@ -98,6 +100,9 @@ impl References {
                 })?;
                 if let Some(name) = source.env_name() {
                     self.env.insert(name.clone());
+                }
+                if let ValueSource::File(reference) = &source {
+                    self.files.insert(root.join(&reference.file));
                 }
                 *value = Value::String(
                     source

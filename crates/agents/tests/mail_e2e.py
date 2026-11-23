@@ -111,8 +111,15 @@ def credentials(root):
     return keyring, identities
 
 
-def signed(raw, identity, *, opaque=False, detached=False):
-    entity = b"Content-Type: text/plain; charset=utf-8\r\n\r\n" + raw
+def signed(raw, identity, *, opaque=False):
+    """Signs `raw`, a protected-header block and body, as standard OpenPGP/MIME or S/MIME."""
+    headers, body = raw.split(b"\r\n\r\n", 1)
+    entity = (
+        b'Content-Type: text/plain; charset=utf-8; protected-headers="v1"\r\n'
+        + headers
+        + b"\r\n\r\n"
+        + body
+    )
     if identity["method"] == "smime":
         options = ["-nodetach", "-binary"] if opaque else []
         mime = command(
@@ -128,8 +135,10 @@ def signed(raw, identity, *, opaque=False, detached=False):
         )
         # OpenSSL may write LF for S/MIME wrapper headers.
         mime = mime.replace(b"\r\n", b"\n").replace(b"\n", b"\r\n")
+        # Keep only the MIME wrapper; the outer headers follow below.
+        mime = b"Content-Type:" + mime.split(b"Content-Type:", 1)[1]
     else:
-        gpg = (
+        signature = command(
             "gpg",
             "--batch",
             "--homedir",
@@ -141,34 +150,59 @@ def signed(raw, identity, *, opaque=False, detached=False):
             "--armor",
             "--output",
             "-",
+            "--detach-sign",
+            task=entity,
         )
-        if detached:
-            signature = command(*gpg, "--detach-sign", task=entity)
-            mime = (
-                b'Content-Type: multipart/signed; protocol="application/pgp-signature"; boundary=pgp\r\n\r\n'
-                b"--pgp\r\n" + entity + b"\r\n--pgp\r\n"
-                b"Content-Type: application/pgp-signature\r\n\r\n"
-                + signature.replace(b"\n", b"\r\n")
-                + b"\r\n--pgp--\r\n"
-            )
-        else:
-            mime = b"Content-Type: text/plain; charset=utf-8\r\n\r\n" + command(
-                *gpg, "--clearsign", task=raw
-            ).replace(b"\r\n", b"\n").replace(b"\n", b"\r\n")
-    # All transport headers below are intentionally false.
+        mime = (
+            b"Content-Type: multipart/signed; micalg=pgp-sha256;\r\n"
+            b' protocol="application/pgp-signature"; boundary=pgp\r\n\r\n'
+            b"--pgp\r\n" + entity + b"\r\n--pgp\r\n"
+            b"Content-Type: application/pgp-signature\r\n\r\n"
+            + signature.replace(b"\n", b"\r\n")
+            + b"\r\n--pgp--\r\n"
+        )
+    # Every outer header is intentionally false: only the signed headers count.
     return (
         b"From: impostor@example.test\r\nTo: wrong@example.test\r\n"
         b"Reply-To: impostor@example.test\r\nSubject: Untrusted subject\r\n"
-        b"Message-ID: <outer@example.test>\r\n"
+        b"Message-ID: <outer@example.test>\r\nMIME-Version: 1.0\r\n"
         b"X-Agents-Authenticated-From: review@example.test\r\n" + mime
     )
 
 
 def job(to, id, body, extra=""):
+    """An ordinary message from a mail client; `signed` protects its headers."""
     return (
-        f"Agent-To: {to}\r\nTask-ID: {id}@example.test\r\nSubject: Work\r\n"
-        f"{extra}\r\n{body}"
+        f"From: {HUMAN}\r\nTo: {to}\r\nMessage-ID: <{id}@example.test>\r\n"
+        f"Subject: Work\r\n{extra}\r\n{body}"
     ).encode()
+
+
+def signed_parts(raw):
+    """Splits a multipart/signed message into its exact signed entity and signature."""
+    message = email.message_from_bytes(raw, policy=email.policy.default)
+    assert message.get_content_type() == "multipart/signed", message
+    delimiter = b"\r\n--" + message.get_boundary().encode()
+    body = raw.split(b"\r\n\r\n", 1)[1]
+    _, entity, signature = (b"\r\n" + body).split(delimiter)[:3]
+    signature = email.message_from_bytes(signature.split(b"\r\n", 1)[1])
+    return entity.split(b"\r\n", 1)[1], signature.get_payload(decode=True)
+
+
+def verify_pgp(raw, home, directory):
+    entity, signature = signed_parts(raw)
+    (directory / "entity").write_bytes(entity)
+    (directory / "entity.asc").write_bytes(signature)
+    command(
+        "gpg",
+        "--batch",
+        "--homedir",
+        home,
+        "--verify",
+        directory / "entity.asc",
+        directory / "entity",
+    )
+    return entity
 
 
 def project(root, role, address, port, smtp, keyring, trusted, signing):
@@ -272,6 +306,7 @@ class Smtp(socketserver.StreamRequestHandler):
                             return
                         parts.append(row[1:] if row.startswith(b"..") else row)
                     raw = b"".join(parts)
+                    self.server.raw.append(raw)
                     self.server.sent.append(
                         (
                             sender,
@@ -299,6 +334,7 @@ def test(binary, imap_port):
     ):
         smtp.imap_port = imap_port
         smtp.sent = []
+        smtp.raw = []
         smtp.lose_ack = False
         root = Path(directory)
         keyring, keys = credentials(root)
@@ -372,7 +408,13 @@ def test(binary, imap_port):
                 keys[f"{BUILDER}/smime"],
             )
             pgp_mime = signed(
-                job(BUILDER, "pgpmime", "PGP MIME"), keys[HUMAN], detached=True
+                job(BUILDER, "pgpmime", "PGP MIME", f"Cc: {REVIEWER}\r\n"),
+                keys[HUMAN],
+            )
+            opaque = signed(
+                job(BUILDER, "opaque", "Opaque S/MIME"),
+                keys[f"{HUMAN}/smime"],
+                opaque=True,
             )
             smime = signed(
                 job(
@@ -404,6 +446,7 @@ def test(binary, imap_port):
                 other,
                 untrusted,
                 pgp_mime,
+                opaque,
                 smime,
                 smime.replace(b"Detached S/MIME", b"Tampered S/MIME"),
                 unsigned,
@@ -411,19 +454,18 @@ def test(binary, imap_port):
                 append(imap_port, "build", item)
             mail(build, "deliver", task=malformed, success=False)
             mail(build, "deliver", "--recipient", REVIEWER, task=raw, success=False)
-            mail(
-                build,
-                "deliver",
-                "--unsigned",
-                "--recipient",
-                BUILDER,
-                task=unsigned,
-                success=False,
-            )
+            mail(build, "deliver", "--unsigned", task=unsigned, success=False)
             mail(build, "receive")
             assert not smtp.sent
+            with imap_login(imap_port) as connection:
+                connection.select("build")
+                # Every source message was consumed; a bad one does not hold up the rest.
+                assert connection.search(None, "UNSEEN")[1] == [b""]
+                rejected = connection.search(None, "KEYWORD", "AgentsRejected")[1]
+                # malformed, other, untrusted, tampered and unsigned mail
+                assert len(rejected[0].split()) == 5, rejected
             items = json.loads(mail(build, "list").stdout)["messages"]
-            assert len(items) == 3, items
+            assert len(items) == 4, items
             assert all(
                 entry["from"] == HUMAN
                 and entry["authenticated"]
@@ -436,7 +478,7 @@ def test(binary, imap_port):
             )["messages"]
             assert len(thread_items) == 2, thread_items
             handled = cli(build, "--once").stdout.splitlines()
-            assert len(handled) == 3
+            assert len(handled) == 4
             initial_session = handled[0].split()[1]
             assert not cli(build, "--once").stdout
             assert not search(build, "Anonymous task")
@@ -468,7 +510,7 @@ def test(binary, imap_port):
             first, duplicate = smtp.sent[-2:]
             assert first[:2] == duplicate[:2] == (BUILD_SMTP, REVIEWER)
             assert first[2]["Message-ID"] == duplicate[2]["Message-ID"]
-            assert duplicate[2].get_content_type() == "application/pkcs7-mime"
+            assert duplicate[2].get_content_type() == "multipart/signed"
             assert cli(review, "--once").stdout.count(b"handled") == 1
             (reviewed,) = search(review, "Handle on review")
             mail(review, "reply", *reference(reviewed), task=b"Back from review")
@@ -480,9 +522,21 @@ def test(binary, imap_port):
             (reply,) = search(build, "Back from review")
             assert reply["from"] == REVIEWER
 
+            # Signed Cc headers survive import, so replies can include everyone.
+            (copied,) = search(build, "PGP MIME")
+            mail(build, "reply", "--all", *reference(copied), task=b"To all")
+            mail(build, "flush")
+            assert {sent[1] for sent in smtp.sent[-2:]} == {HUMAN, REVIEWER}
+            assert all(
+                sent[2]["In-Reply-To"] == "<pgpmime@example.test>"
+                for sent in smtp.sent[-2:]
+            )
+
             configuration = json.loads(build.read_text())
             configuration["mail"]["transport"]["dangerously_allow_unsigned"] = True
             build.write_text(json.dumps(configuration))
+            # Unsigned IMAP mail was rejected while disabled; deliver it again.
+            mail(build, "deliver", "--unsigned", task=unsigned)
             assert (
                 cli(build, "--once").stdout.strip()
                 == b"handled " + initial_session + b" resume"
@@ -503,19 +557,18 @@ def test(binary, imap_port):
                 task=malformed,
                 success=False,
             )
+            # The same unsigned message is imported once.
             mail(build, "deliver", "--unsigned", "--recipient", BUILDER, task=unsigned)
-            assert (
-                cli(build, "--once").stdout.strip()
-                == b"handled " + initial_session + b" resume"
-            )
+            assert not cli(build, "--once").stdout
             configuration["mail"]["transport"]["dangerously_allow_unsigned"] = False
             build.write_text(json.dumps(configuration))
             assert not search(build, "Anonymous task")
             assert not cli(build, "--once").stdout
 
+            # Standard mail to a +tag address reaches that agent.
             editor_task = signed(
                 job(EDITOR, "edit", "Please acknowledge this task"), keys[HUMAN]
-            ).replace(b"To: wrong@example.test", b"To: " + EDITOR.encode(), 1)
+            )
             append(imap_port, "build", editor_task)
             started = cli(build, "--once").stdout.strip().split()
             assert started[0] == b"handled" and started[2] == b"start"
@@ -525,16 +578,11 @@ def test(binary, imap_port):
             assert (sender, recipient) == (BUILD_SMTP, HUMAN)
             assert outbound["From"] == BUILD_SMTP
             assert outbound["Reply-To"] == EDITOR
-            cleartext = command(
-                "gpg",
-                "--batch",
-                "--homedir",
-                keys[BUILD_SMTP]["home"],
-                "--decrypt",
-                task=outbound.get_content().encode(),
-            )
-            assert f"Agent-To: {HUMAN}".encode() in cleartext
-            assert b"Task acknowledged" in cleartext
+            entity = verify_pgp(smtp.raw[-1], keys[BUILD_SMTP]["home"], root)
+            assert b'protected-headers="v1"' in entity
+            assert f"To: {HUMAN}".encode() in entity
+            assert f"Reply-To: {EDITOR}".encode() in entity
+            assert b"Task acknowledged" in entity
 
             parent = outbound["Message-ID"]
             follow_up = signed(
@@ -545,7 +593,7 @@ def test(binary, imap_port):
                     f"In-Reply-To: {parent}\r\n",
                 ),
                 keys[HUMAN],
-            ).replace(b"To: wrong@example.test", b"To: " + EDITOR.encode(), 1)
+            )
             append(imap_port, "build", follow_up)
             assert cli(build, "--once").stdout.strip().split() == [
                 b"handled",
@@ -563,6 +611,57 @@ def test(binary, imap_port):
                 mail(build, "search", "--agent", "edit", "Local task").stdout
             )["messages"]
             assert local["from"] == BUILDER
+
+            daemon_log = root / "daemon.log"
+            with daemon_log.open("wb") as log:
+                daemon = subprocess.Popen(
+                    [binary],
+                    cwd=review.parent,
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
+                    env=dict(os.environ, AGENTS_SMOKE_IMAP="pass"),
+                )
+            try:
+
+                def eventually(check, seconds):
+                    deadline = time.monotonic() + seconds
+                    while time.monotonic() < deadline:
+                        if check():
+                            return True
+                        assert daemon.poll() is None, daemon_log.read_text()
+                        time.sleep(0.1)
+                    raise AssertionError(daemon_log.read_text())
+
+                def handled(text):
+                    found = search(review, text)
+                    return len(found) == 1 and not found[0]["unread"]
+
+                # The reply-all copy is already waiting; then the daemon idles.
+                eventually(lambda: handled("To all"), 15)
+                started = time.monotonic()
+                append(
+                    imap_port,
+                    "review",
+                    signed(
+                        job(REVIEWER, "idle", "Pushed over IDLE").replace(
+                            HUMAN.encode(), BUILDER.encode(), 1
+                        ),
+                        keys[f"{BUILDER}/smime"],
+                    ),
+                )
+                eventually(lambda: handled("Pushed over IDLE"), 10)
+                # Far below the 60 second poll interval: IMAP IDLE woke the receiver.
+                assert time.monotonic() - started < 5
+
+                configuration = json.loads(review.read_text())
+                configuration["agents"]["review"]["description"] = "Reloaded"
+                review.write_text(json.dumps(configuration))
+                eventually(
+                    lambda: b"configuration reloaded" in daemon_log.read_bytes(), 5
+                )
+            finally:
+                daemon.terminate()
+                daemon.wait(timeout=5)
         finally:
             smtp.shutdown()
             thread.join()

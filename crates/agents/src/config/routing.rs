@@ -11,7 +11,7 @@ use std::{
     collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
-    rc::Rc,
+    sync::Arc,
 };
 
 #[derive(Default, Deserialize, JsonSchema)]
@@ -51,6 +51,10 @@ pub(super) struct AgentMail {
 pub struct MailRoutes {
     root: PathBuf,
     entries: BTreeMap<String, AgentMailbox>,
+    /// Paths whose metadata changes when the routing configuration may have changed.
+    pub(super) watched: Vec<PathBuf>,
+    /// Digests of every routed project's merged configuration.
+    pub(super) digests: Vec<[u8; 32]>,
 }
 
 impl MailRoutes {
@@ -122,7 +126,7 @@ pub struct MailIdentity<'a> {
 
 #[derive(Clone)]
 pub struct AgentMailbox {
-    pub project: Rc<LocatedProject>,
+    pub project: Arc<LocatedProject>,
     pub agent: Id,
     address: MailAddress,
 }
@@ -176,7 +180,7 @@ impl LocatedProject {
 impl Workspace {
     pub fn at_mailbox(mailbox: &AgentMailbox) -> Self {
         Self {
-            selected: Rc::clone(&mailbox.project),
+            selected: Arc::clone(&mailbox.project),
         }
     }
 
@@ -207,15 +211,22 @@ impl Workspace {
         let mut routes = MailRoutes {
             root: root.clone(),
             entries: BTreeMap::new(),
+            watched: Vec::new(),
+            digests: Vec::new(),
         };
         let mut directories = vec![root.clone()];
         while let Some(directory) = directories.pop() {
             let entry = if self.selected.root == directory {
-                Some(Rc::clone(&self.selected))
+                Some(Arc::clone(&self.selected))
             } else {
-                LocatedProject::find(&directory)?.map(Rc::new)
+                LocatedProject::find(&directory)?.map(Arc::new)
             };
+            if self.selected.config.mail.workspace.is_some() {
+                routes.watched.push(directory.clone());
+            }
             if let Some(project) = entry {
+                routes.watched.extend(project.sources.paths.iter().cloned());
+                routes.digests.push(project.sources.digest);
                 let default = project.config.mail.address.as_ref();
                 let name = project
                     .root
@@ -262,7 +273,7 @@ impl Workspace {
                     routes.entries.insert(
                         key,
                         AgentMailbox {
-                            project: Rc::clone(&project),
+                            project: Arc::clone(&project),
                             agent: agent.clone(),
                             address,
                         },

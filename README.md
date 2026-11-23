@@ -32,16 +32,31 @@ agents
 ```
 
 With no arguments, `agents` runs in the foreground. It flushes outgoing mail
-and runs the recipient agent once for each message that is unread at startup
-or arrives unread later. It runs one agent at a time. Stop it with `Ctrl-C`.
-`agents --once` makes a single such pass and exits, failing if any delivery
-or run failed; use it from scripts or a scheduler. Set up [mail addresses](#exchange-mail-locally) and install and
+and runs the recipient agent once for each unread message. Each agent has
+its own worker, so agents run in parallel while each one handles its mail in
+order. Stop it with `Ctrl-C`. `agents --once` handles the current backlog and
+exits, failing if any delivery or run failed; use it from scripts or a
+scheduler. Set up [mail addresses](#exchange-mail-locally) and install and
 authenticate the harnesses your agents use.
 
-An unchanged unread message does not trigger repeated runs in the same
-service process, even if the harness fails. Restarting the service checks
-all unread mail again and reloads the project configuration. The service
-does not mark messages read or turn stdout into a reply.
+Run state lives on the messages in the private inbox, so it survives
+restarts. Before a run starts, the message gets the `AgentsDispatched`
+keyword, and the message never starts another run, even if the agent leaves
+it unread. A run that fails or times out also gets `AgentsFailed`;
+`agents mail list` reports both as `dispatched` and `failed`. To run the agent
+again for a message, use `agents mail retry --agent <id> <uid> --uid-validity
+<n>`. The service does not mark messages read or turn stdout into a reply;
+read state belongs to the agent.
+
+A run, including any processes the harness started, is killed after
+`agents.<id>.timeout` seconds (default 3600; set it for every agent in
+`agents.default`). `after` hooks still run, with a null `status`.
+
+The service reloads the project configuration when its files change,
+including `.agents.d/` layers, referenced files, and the projects in a
+`mail.workspace`. Runs already in progress finish with the configuration
+they started with. An invalid edit is reported and the previous
+configuration stays in effect until the files are fixed.
 
 The first message starts a native agent session. A reply in that thread
 resumes the same session for that agent, even after restarting `agents`.
@@ -162,7 +177,7 @@ restores Bcc. Blind recipients do not appear in delivered headers.
 
 Use addresses your provider routes to, and an address it authorizes for
 SMTP submission.
-`agents` polls an ordinary IMAP folder and authenticates external mail with
+`agents` watches an ordinary IMAP folder and authenticates external mail with
 **OpenPGP or S/MIME**. It does not listen on a mail port or require a
 gateway. IMAP and SMTP passwords log in to the provider; they do not
 authenticate the person sending a task.
@@ -210,15 +225,20 @@ mail:
 ```
 
 Use the provider's app-specific password where required. To reach the
-`reviewer` Agent, send to `project.agent+reviewer@example.test` and use the
-same address in the signed `Agent-To:`. You can also send to the untagged
-mailbox; signed ingress routes by `Agent-To:`, not the outer `To:`.
+`reviewer` Agent, send signed mail to `project.agent+reviewer@example.test`
+from any mail client that signs with OpenPGP/MIME or S/MIME, such as
+Thunderbird or Apple Mail. Every Agent of the project in `To` or `Cc` gets
+its own copy; addresses of other projects and people are kept for replies.
 
 `mail.transport.smtp.from` sets both the outgoing `From:` and the SMTP
 envelope sender. When it differs from the Agent address, the outgoing
 `Reply-To:` is the Agent address so email clients direct replies to its tag.
 If `smtp.from` is omitted, the Agent's own address is used for SMTP as before.
 The signing key is looked up first by Agent address, then by `smtp.from`.
+Outgoing mail is standard `multipart/signed` mail that ordinary clients
+verify. The signed part repeats `From`, `To`, `Cc`, `Subject`, `Date`,
+`Message-ID`, the thread headers and the Agent's `Reply-To` as
+[protected headers](https://datatracker.ietf.org/doc/draft-ietf-lamps-header-protection/).
 For signed Agent-to-Agent mail between separate projects, use a distinct
 signing identity for each Agent and pin it to that Agent's routing address
 on the receiving side. A shared key authenticates the project mailbox, not
@@ -230,33 +250,35 @@ fingerprint with `openssl x509 -in signer.pem -noout -sha256 -fingerprint`.
 The exact pinned certificate, not the public CA store or `From`, identifies
 the signer. Remove obsolete pins when replacing a certificate or key.
 
-Send signed mail with this text **inside the signed part**, followed by a
-blank line and the task:
+The sender of signed mail is always the pinned signer. When the signed part
+carries protected headers, as Thunderbird and `agents` write them, those
+headers replace the outer ones; otherwise the outer `To`, `Cc`, `Subject`,
+`Date`, `Message-ID` and thread headers are used, and the outer `Reply-To`
+is ignored. Supported input is OpenPGP/MIME and detached or opaque S/MIME;
+attachments inside the signed part are kept. The importer does not decrypt
+encrypted mail.
 
-```text
-Agent-To: project.agent+reviewer@example.test
-Task-ID: 550e8400-e29b-41d4-a716-446655440000@example.test
-Subject: Review this change
-
-Please check the new tests.
-```
-
-Use a new `Task-ID` for each new task. Optional `In-Reply-To` and
-`References` fields use message IDs in angle brackets to continue a thread.
-The outer address is still used for mail delivery, but outer sender,
-subject, reply and thread headers don't establish identity or affect the
-imported task. Supported input is OpenPGP/MIME, a standalone clear-signed
-text body, or detached/opaque S/MIME with a signed plain-text part. The
-importer does not expose attachments or decrypt encrypted mail.
+A signature older than `mail.transport.signatures.max_age` seconds (default 7 days), or
+dated in the future, is rejected. Within that window a replayed message is
+recognized by its signed `Message-ID`, or by the signed content when it has
+none, and imported only once. S/MIME certificates must also be within their
+validity period.
 
 ```sh
-agents mail receive                  # Import unread IMAP mail without running agents
+agents mail receive                  # Import unseen IMAP mail without running agents
 agents mail deliver < message.eml    # Verify and import a saved message
-agents --once                        # Import, flush, and run one pass
+agents --once                        # Import, flush, and handle the backlog
 ```
 
-The source folder is not modified. Accepted mail and replay records are
-kept in the project's private local inbox. The outbox is local by default;
+The service keeps one IMAP connection open and waits with IDLE when the
+server supports it; otherwise it checks every `mail.transport.imap.poll_interval` seconds
+(default 60). Connection failures are retried with exponential backoff up to
+five minutes. Every unseen message in the source folder is imported or
+rejected and then marked `\Seen`, which serves as the receive cursor. A
+rejected message also gets the `AgentsRejected` keyword when the server
+allows it, and does not hold up the messages after it. On upgrading, unseen
+mail already in the folder is processed once. Accepted mail and replay
+records are kept in the project's private local inbox. The outbox is local by default;
 an optional `mail.transport.outbox` names a separate private IMAP folder
 that supports permanent custom keywords. SMTP deliveries are signed per
 recipient with the configured signing identity. For OpenPGP
@@ -267,9 +289,11 @@ need GnuPG for OpenPGP and the OpenSSL CLI for S/MIME on `PATH`.
 
 ### Optional unsigned ingress
 
-`mail.transport.dangerously_allow_unsigned: true` permits unsigned IMAP mail addressed
-to exactly one local agent in `To` or `Cc`, and enables explicit local
-import with `agents mail deliver --unsigned --recipient <address>`.
+`mail.transport.dangerously_allow_unsigned: true` permits unsigned IMAP mail
+addressed to local agents in `To` or `Cc`, and enables explicit local import
+with `agents mail deliver --unsigned [--recipient <address>]`. Unsigned IMAP
+mail that arrives while the switch is off is rejected. Delivering the same
+unsigned message again does not import it twice.
 Unsigned mail can trigger an agent, receive replies and resume a thread
 under the normal mail rules. It is labeled `authenticated: false`.
 **Enable this only if you accept unauthenticated sender, reply and thread
@@ -297,9 +321,13 @@ The foreground service flushes automatically. If it is not running, run
 `agents mail pending` shows queued, rejected, and expired deliveries.
 Only a final SMTP `250` counts as success; `5xx` ends that delivery,
 while `4xx` or a lost acknowledgment is retried with the same `Message-ID`.
-A lost acknowledgment can cause a duplicate. Retries are per recipient,
+A lost acknowledgment can cause a duplicate, which a receiving `agents`
+recognizes by its signed `Message-ID`. Retries are per recipient,
 use [Postfix-style backoff](https://www.postfix.org/qmgr.8.html), and expire
-after five days by default. A successful `send` means queued, not delivered.
+after five days by default. A message that cannot be delivered does not hold
+up the others. A successful `send` means queued, not delivered. Finished
+outbox records are removed after `mail.transport.retry.retain` seconds (default 7 days;
+0 keeps them).
 
 ## Project configuration
 

@@ -254,10 +254,18 @@ pub(super) enum Action {
     Flush,
     /// List pending, expired or rejected deliveries.
     Pending,
-    /// Import unread IMAP mail without launching an agent.
+    /// Import unseen IMAP mail without launching an agent.
     Receive,
-    /// Verify and import an RFC 5322 message on stdin.
+    /// Clear a message's dispatched and failed state so the daemon runs the agent for it again.
+    Retry {
+        #[command(flatten)]
+        identity: Identity,
+        #[command(flatten)]
+        reference: Reference,
+    },
+    /// Verify and import an RFC 5322 message on stdin for each project agent in To and Cc.
     Deliver {
+        /// Deliver only to this agent, for example the envelope recipient given by an MDA.
         #[arg(long)]
         recipient: Option<MailAddress>,
         /// Import an unsigned message; requires mail.transport.dangerously_allow_unsigned.
@@ -278,16 +286,25 @@ impl Action {
                 print_json(&workspace.mail_routes()?.identities())?;
                 Ok(ExitCode::SUCCESS)
             }
-            Self::Flush => {
-                mail::flush(&workspace)?;
-                Ok(ExitCode::SUCCESS)
-            }
+            Self::Flush => Ok(if mail::flush(&workspace)? {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            }),
             Self::Pending => {
                 print_json(&mail::pending(&workspace)?)?;
                 Ok(ExitCode::SUCCESS)
             }
             Self::Receive => {
-                mail::ImapIngress::default().poll(&workspace, &workspace.mail_routes()?)?;
+                mail::ImapIngress::default().receive(&workspace, &workspace.mail_routes()?)?;
+                Ok(ExitCode::SUCCESS)
+            }
+            Self::Retry {
+                identity,
+                reference,
+            } => {
+                let (routes, mailbox) = workspace.mailbox_for(identity.agent.as_ref())?;
+                MailAccess::new(workspace.mail(), &routes, &mailbox)?.retry(reference.into())?;
                 Ok(ExitCode::SUCCESS)
             }
             Self::Deliver {

@@ -32,7 +32,11 @@ pub(super) fn handle_mail(command: impl Fn() -> Command, agent: &str, body: &str
         root,
         &format!("{agent}@example.test"),
         "human@example.test",
-        &format!("From: human@example.test\r\nSubject: Task\r\n\r\n{body}\r\n"),
+        // Identical mbox messages share flags, so give each task its own Message-ID.
+        &format!(
+            "From: human@example.test\r\nSubject: Task\r\nMessage-ID: <{}@example.test>\r\n\r\n{body}\r\n",
+            uuid::Uuid::new_v4()
+        ),
     );
     command()
         .arg("--once")

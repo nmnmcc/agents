@@ -13,7 +13,7 @@ use std::{
     net::Shutdown,
     os::unix::net::{UnixListener, UnixStream},
     path::{Path, PathBuf},
-    sync::mpsc,
+    sync::atomic::{AtomicBool, Ordering},
     thread,
     time::Duration,
 };
@@ -123,42 +123,36 @@ pub fn with_bridge<T>(
     run: impl FnOnce() -> Result<T>,
 ) -> Result<T> {
     let listener = UnixListener::bind(socket).context("bind private mail MCP socket")?;
-    listener.set_nonblocking(true)?;
+    let stopped = AtomicBool::new(false);
     thread::scope(|scope| {
-        let (stop, stopped) = mpsc::channel::<()>();
-        let bridge = scope.spawn(move || -> Result<()> {
-            while matches!(stopped.try_recv(), Err(mpsc::TryRecvError::Empty)) {
-                match listener.accept() {
-                    Ok((mut stream, _)) => {
-                        stream.set_nonblocking(false)?;
-                        stream.set_read_timeout(Some(Duration::from_secs(10)))?;
-                        stream.set_write_timeout(Some(Duration::from_secs(10)))?;
-                        let response = serde_json::from_reader(&stream)
-                            .context("invalid mail request")
-                            .and_then(&mut handle);
-                        let _ = serde_json::to_writer(
-                            &mut stream,
-                            &match response {
-                                Ok(value) => Response::Ok(value),
-                                Err(error) => Response::Error(format!("{error:#}")),
-                            },
-                        );
-                        let _ = stream.flush();
-                    }
-                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                        thread::park_timeout(Duration::from_millis(20));
-                    }
-                    Err(error) => return Err(error).context("accept mail MCP request"),
+        let bridge = scope.spawn(|| -> Result<()> {
+            loop {
+                let (mut stream, _) = listener.accept().context("accept mail MCP request")?;
+                if stopped.load(Ordering::Acquire) {
+                    return Ok(());
                 }
+                stream.set_read_timeout(Some(Duration::from_secs(10)))?;
+                let response = serde_json::from_reader(&stream)
+                    .context("invalid mail request")
+                    .and_then(&mut handle);
+                let _ = serde_json::to_writer(
+                    &mut stream,
+                    &match response {
+                        Ok(value) => Response::Ok(value),
+                        Err(error) => Response::Error(format!("{error:#}")),
+                    },
+                );
+                let _ = stream.flush();
             }
-            Ok(())
         });
         let result = run();
-        drop(stop);
-        bridge.thread().unpark();
+        stopped.store(true, Ordering::Release);
+        // Wake the blocking accept so the bridge sees the stop request.
+        let woken = UnixStream::connect(socket);
         bridge
             .join()
             .map_err(|_| anyhow::anyhow!("mail MCP bridge stopped unexpectedly"))??;
+        drop(woken);
         result
     })
 }
