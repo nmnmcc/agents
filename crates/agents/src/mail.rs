@@ -1,10 +1,12 @@
 mod inbox;
+mod ingress;
 pub mod mcp;
 mod outbox;
 pub mod request;
 mod retry;
 mod run;
 mod sessions;
+mod signatures;
 mod store;
 mod transport;
 
@@ -33,42 +35,58 @@ use std::{
 };
 use store::Folder;
 
-pub use outbox::{deliver, flush, pending};
+pub use ingress::{ImapIngress, deliver};
+pub use outbox::{flush, pending};
 pub use run::execute;
 pub use sessions::SessionBusy;
 
 #[derive(Default, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct MailConfig {
-    /// Dedicated mailbox written only by a gateway that replaces the envelope recipient stamp.
+    /// Ordinary IMAP inbox to poll for incoming jobs.
     imap: Option<transport::Incoming>,
-    /// An IMAP outbox folder, defaulting to AgentOutbox when IMAP is configured.
+    /// Optional private IMAP queue. By default the outbox is stored locally.
     outbox: Option<String>,
     smtp: Option<transport::Outgoing>,
+    #[serde(default)]
+    signatures: signatures::Signatures,
+    /// Allow unsigned mail to trigger agents. It cannot establish a reply or session identity.
+    #[serde(default)]
+    allow_unsigned: bool,
     #[serde(default, deserialize_with = "retry::decode")]
     retry: retry::Policy,
 }
 
 impl MailConfig {
-    fn open(&self, root: &Path, directory: &Path, outbox: bool) -> Result<Folder> {
-        let Some(incoming) = &self.imap else {
-            return Folder::local(
-                root,
-                directory,
-                if outbox { "outbox.mbox" } else { "inbox.mbox" },
+    pub fn check(&self) -> Result<()> {
+        self.signatures.check()?;
+        if let Some(name) = &self.outbox {
+            let incoming = self
+                .imap
+                .as_ref()
+                .context("IMAP outbox requires an IMAP account")?;
+            ensure!(
+                !name.eq_ignore_ascii_case(&incoming.mailbox),
+                "outbox must be a separate IMAP folder"
             );
-        };
-        let outbox_name = self.outbox.as_deref().unwrap_or("AgentOutbox");
-        ensure!(
-            !outbox_name.eq_ignore_ascii_case(&incoming.mailbox),
-            "outbox must be a separate IMAP folder"
-        );
-        let (name, keywords) = if outbox {
-            (outbox_name, outbox::FLAGS)
-        } else {
-            (incoming.mailbox.as_str(), &[][..])
-        };
-        Folder::imap(transport::connect(incoming, root)?, name, keywords)
+        }
+        Ok(())
+    }
+
+    fn open(&self, root: &Path, directory: &Path, outbox: bool) -> Result<Folder> {
+        // The inbox is always private and local, including when fetching from IMAP.
+        if outbox && let Some(name) = &self.outbox {
+            let incoming = self
+                .imap
+                .as_ref()
+                .context("IMAP outbox requires an IMAP account")?;
+            return Folder::imap(transport::connect(incoming, root)?, name, outbox::FLAGS);
+        }
+        Folder::local(
+            root,
+            directory,
+            if outbox { "outbox.mbox" } else { "inbox.mbox" },
+        )
     }
 
     fn secrets(&self) -> Vec<&EnvName> {

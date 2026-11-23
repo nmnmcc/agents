@@ -24,7 +24,7 @@ pub(super) struct ProjectMail {
     /// Where local mbox files are stored, relative to the project.
     directory: Option<RelativePath>,
     #[serde(default)]
-    transport: MailConfig,
+    pub(super) transport: MailConfig,
     /// Limit incoming mail from registered agents. Omission allows all agents.
     from: Option<Vec<AgentSelector>>,
     /// Limit outgoing mail to registered agents. Omission allows all agents.

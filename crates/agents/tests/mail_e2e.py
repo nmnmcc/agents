@@ -1,4 +1,4 @@
-"""Live IMAP/SMTP round trip with an unprivileged Dovecot instance."""
+"""Live IMAP/SMTP round trip with an ordinary Dovecot mailbox and real signatures."""
 
 import argparse
 import email
@@ -20,15 +20,9 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
-MAILBOXES = {
-    "build": "agents+build@example.test",
-    "review": "review@example.test",
-    "qa": "agents+qa@example.test",
-    "audit": "agents+audit@example.test",
-    "ops": "agents+ops@example.test",
-}
-TARGETS = [address for role, address in MAILBOXES.items() if role != "build"]
-REPLY_TO = "tickets@example.test"
+BUILDER = "agents+build@example.test"
+REVIEWER = "review@example.test"
+HUMAN = "human@example.test"
 
 
 def imap_login(port):
@@ -37,83 +31,213 @@ def imap_login(port):
     return connection
 
 
-def append(port, raw):
+def append(port, folder, raw):
     with imap_login(port) as connection:
-        assert connection.append("AgentTasks", None, None, raw)[0] == "OK"
+        assert connection.append(folder, None, None, raw)[0] == "OK"
 
 
-def fixture(root, imap_port, smtp_port):
-    project_dir = root / "website"
-    drops = project_dir / ".agents.d"
-    drops.mkdir(parents=True)
-    (drops / "10-project.json").write_text(
+def command(*args, task=None):
+    proc = subprocess.run(args, input=task, capture_output=True, timeout=30)
+    assert proc.returncode == 0, (args, proc.stderr.decode(errors="replace"))
+    return proc.stdout
+
+
+def credentials(root):
+    home = root / "gpg"
+    home.mkdir(mode=0o700)
+    gpg = ("gpg", "--batch", "--homedir", home)
+    identities = {}
+    for address in (HUMAN, REVIEWER):
+        command(
+            *gpg,
+            "--pinentry-mode",
+            "loopback",
+            "--passphrase",
+            "",
+            "--quick-generate-key",
+            address,
+            "ed25519",
+            "sign",
+            "0",
+        )
+        listing = command(*gpg, "--with-colons", "--fingerprint", address)
+        fingerprints = [
+            line.split(b":")[9].decode()
+            for line in listing.splitlines()
+            if line.startswith(b"fpr:")
+        ]
+        assert len(fingerprints) == 1
+        identities[address] = {
+            "method": "openpgp",
+            "fingerprint": fingerprints[0],
+            "home": str(home),
+        }
+    keyring = root / "pubring.gpg"
+    keyring.write_bytes(command(*gpg, "--export"))
+    for address in (HUMAN, BUILDER):
+        key = root / f"{address}.key"
+        cert = root / f"{address}.pem"
+        command(
+            "openssl",
+            "req",
+            "-x509",
+            "-newkey",
+            "rsa:2048",
+            "-nodes",
+            "-days",
+            "2",
+            "-subj",
+            f"/CN=Fixture/emailAddress={address}",
+            "-keyout",
+            key,
+            "-out",
+            cert,
+        )
+        fingerprint = (
+            command("openssl", "x509", "-in", cert, "-noout", "-fingerprint", "-sha256")
+            .decode()
+            .strip()
+            .split("=", 1)[1]
+        )
+        identities[f"{address}/smime"] = {
+            "method": "smime",
+            "fingerprint": fingerprint,
+            "certificate": str(cert),
+            "key": str(key),
+        }
+    return keyring, identities
+
+
+def signed(raw, identity, *, opaque=False, detached=False):
+    entity = b"Content-Type: text/plain; charset=utf-8\r\n\r\n" + raw
+    if identity["method"] == "smime":
+        options = ["-nodetach", "-binary"] if opaque else []
+        mime = command(
+            "openssl",
+            "cms",
+            "-sign",
+            *options,
+            "-signer",
+            identity["certificate"],
+            "-inkey",
+            identity["key"],
+            task=entity,
+        )
+        # OpenSSL may write LF for S/MIME wrapper headers.
+        mime = mime.replace(b"\r\n", b"\n").replace(b"\n", b"\r\n")
+    else:
+        gpg = (
+            "gpg",
+            "--batch",
+            "--homedir",
+            identity["home"],
+            "--local-user",
+            identity["fingerprint"],
+            "--digest-algo",
+            "SHA256",
+            "--armor",
+            "--output",
+            "-",
+        )
+        if detached:
+            signature = command(*gpg, "--detach-sign", task=entity)
+            mime = (
+                b'Content-Type: multipart/signed; protocol="application/pgp-signature"; boundary=pgp\r\n\r\n'
+                b"--pgp\r\n" + entity + b"\r\n--pgp\r\n"
+                b"Content-Type: application/pgp-signature\r\n\r\n"
+                + signature.replace(b"\n", b"\r\n")
+                + b"\r\n--pgp--\r\n"
+            )
+        else:
+            mime = b"Content-Type: text/plain; charset=utf-8\r\n\r\n" + command(
+                *gpg, "--clearsign", task=raw
+            ).replace(b"\r\n", b"\n").replace(b"\n", b"\r\n")
+    # All transport headers below are intentionally false.
+    return (
+        b"From: impostor@example.test\r\nTo: wrong@example.test\r\n"
+        b"Reply-To: impostor@example.test\r\nSubject: Untrusted subject\r\n"
+        b"Message-ID: <outer@example.test>\r\n"
+        b"X-Agents-Authenticated-From: review@example.test\r\n" + mime
+    )
+
+
+def job(to, id, body, extra=""):
+    return (
+        f"Agent-To: {to}\r\nTask-ID: {id}@example.test\r\nSubject: Work\r\n"
+        f"{extra}\r\n{body}"
+    ).encode()
+
+
+def project(root, role, address, port, smtp, keyring, trusted, signing):
+    root.mkdir()
+    harness = Path(__file__).resolve().with_name("fixtures") / "fake_mail_harness.py"
+    path = root / ".agents.json"
+    path.write_text(
         json.dumps(
             {
                 "version": 1,
-                "agent": "build",
+                "agent": role,
                 "agents": {
                     role: {"harness": "fake", "description": role, "instructions": role}
-                    for role in MAILBOXES
                 },
-            }
-        )
-    )
-    (drops / "20-mail.json").write_text(
-        json.dumps(
-            {
-                "agents": {
-                    "review": {
-                        "mail": {
-                            "address": "{{ agent.id }}@example.test",
-                            "from": ["build"],
-                        }
-                    },
-                },
-            }
-        )
-    )
-    harness = Path(__file__).resolve().with_name("fixtures") / "fake_mail_harness.py"
-    (drops / "30-transport.json").write_text(
-        json.dumps(
-            {
                 "harnesses": {
                     "fake": {
                         "program": sys.executable,
-                        "args": [str(harness), "{{ agent.id }}", "{{ mcp | tojson }}"],
+                        "args": [str(harness), "{{ mcp | tojson }}"],
                         "capabilities": {"mcp": ["stdio"]},
-                    }
+                    },
                 },
                 "mail": {
-                    "address": "agents+{{ agent.id }}@example.test",
-                    "trust": ["human@example.test", REPLY_TO],
+                    "address": address,
+                    "trust": [HUMAN, BUILDER, REVIEWER],
                     "transport": {
                         "imap": {
                             "endpoint": {
                                 "host": "127.0.0.1",
-                                "port": imap_port,
+                                "port": port,
                                 "security": "loopback",
                             },
                             "login": {
                                 "username": "test",
                                 "password": {"env": "AGENTS_SMOKE_IMAP"},
                             },
-                            "mailbox": "AgentTasks",
+                            "mailbox": role,
                         },
-                        "outbox": "AgentOutbox",
                         "smtp": {
                             "endpoint": {
                                 "host": "127.0.0.1",
-                                "port": smtp_port,
+                                "port": smtp,
                                 "security": "loopback",
-                            }
+                            },
                         },
-                        "retry": {"minimal_backoff_time": 3, "maximal_backoff_time": 3},
+                        "retry": {"minimal_backoff_time": 2, "maximal_backoff_time": 2},
+                        "signatures": {
+                            "openpgp_keyring": str(keyring),
+                            "trusted": [
+                                {
+                                    "address": address,
+                                    **{
+                                        key: identity[key]
+                                        for key in ("method", "fingerprint")
+                                    },
+                                }
+                                for address, identity in trusted
+                            ],
+                            "signing": {
+                                address: {
+                                    key: val
+                                    for key, val in signing.items()
+                                    if key != "fingerprint"
+                                    or signing["method"] == "openpgp"
+                                },
+                            },
+                        },
                     },
                 },
             }
         )
     )
-    return project_dir
+    return path
 
 
 class Smtp(socketserver.StreamRequestHandler):
@@ -121,16 +245,14 @@ class Smtp(socketserver.StreamRequestHandler):
         self.wfile.write(b"220 loopback ESMTP\r\n")
         sender = recipient = None
         for line in self.rfile:
-            command = line.split(maxsplit=1)[0].upper()
-            match command:
+            match line.split(maxsplit=1)[0].upper():
                 case b"EHLO" | b"HELO":
                     self.wfile.write(b"250 loopback\r\n")
-                case b"MAIL" | b"RCPT":
-                    mailbox = re.search(rb"<([^<>]+)>", line)[1]
-                    if command == b"MAIL":
-                        sender = mailbox
-                    else:
-                        recipient = mailbox
+                case b"MAIL":
+                    sender = re.search(rb"<([^<>]+)>", line)[1].decode()
+                    self.wfile.write(b"250 OK\r\n")
+                case b"RCPT":
+                    recipient = re.search(rb"<([^<>]+)>", line)[1].decode()
                     self.wfile.write(b"250 OK\r\n")
                 case b"DATA":
                     self.wfile.write(b"354 end with dot\r\n")
@@ -139,21 +261,16 @@ class Smtp(socketserver.StreamRequestHandler):
                         if not row:
                             return
                         parts.append(row[1:] if row.startswith(b"..") else row)
-                    data = b"".join(parts)
+                    raw = b"".join(parts)
                     self.server.sent.append(
                         (
                             sender,
                             recipient,
-                            email.message_from_bytes(data, policy=email.policy.default),
+                            email.message_from_bytes(raw, policy=email.policy.default),
                         )
                     )
-                    if recipient.decode("ascii") in MAILBOXES.values():
-                        # The fixture acts as the trusted delivery gateway.
-                        append(
-                            self.server.imap_port,
-                            b"X-Agents-Envelope-To: " + recipient + b"\r\n"
-                            b"X-Agents-Authenticated-From: " + sender + b"\r\n" + data,
-                        )
+                    if folder := {BUILDER: "build", REVIEWER: "review"}.get(recipient):
+                        append(self.server.imap_port, folder, raw)
                     if self.server.lose_ack:
                         self.server.lose_ack = False
                         return
@@ -165,380 +282,200 @@ class Smtp(socketserver.StreamRequestHandler):
                     self.wfile.write(b"500 unexpected command\r\n")
 
 
-def message(sender, role, message_id):
-    return (
-        f"X-Agents-Envelope-To: {MAILBOXES[role]}\r\n"
-        f"X-Agents-Authenticated-From: {sender}\r\n"
-        f"From: {sender}\r\n"
-        f"Message-ID: <{message_id}@example.test>\r\n"
-        "Subject: Work\r\n\r\nDo the work."
-    ).encode()
-
-
 def test(binary, imap_port):
     with (
-        tempfile.TemporaryDirectory() as directory,
+        tempfile.TemporaryDirectory(prefix="agents-") as directory,
         socketserver.TCPServer(("127.0.0.1", 0), Smtp) as smtp,
     ):
         smtp.imap_port = imap_port
         smtp.sent = []
         smtp.lose_ack = False
-        project = fixture(Path(directory), imap_port, smtp.server_address[1])
+        root = Path(directory)
+        keyring, keys = credentials(root)
+        trusted = [(HUMAN, keys[HUMAN]), (HUMAN, keys[f"{HUMAN}/smime"])]
+        port = smtp.server_address[1]
+        build = project(
+            root / "builder",
+            "build",
+            BUILDER,
+            imap_port,
+            port,
+            keyring,
+            [*trusted, (REVIEWER, keys[REVIEWER])],
+            keys[f"{BUILDER}/smime"],
+        )
+        review = project(
+            root / "reviewer",
+            "review",
+            REVIEWER,
+            imap_port,
+            port,
+            keyring,
+            [(BUILDER, keys[f"{BUILDER}/smime"])],
+            keys[REVIEWER],
+        )
         with imap_login(imap_port) as connection:
-            for folder in ("AgentTasks", "AgentOutbox"):
+            for folder in ("build", "review"):
                 assert connection.create(folder)[0] == "OK"
         thread = threading.Thread(target=smtp.serve_forever, daemon=True)
         thread.start()
         try:
 
-            def cli(*args, success=True, task=None):
+            def cli(config, *args, task=None, success=True):
                 proc = subprocess.run(
                     [binary, *args],
-                    cwd=project,
-                    text=True,
+                    cwd=config.parent,
                     capture_output=True,
                     input=task,
                     env=dict(os.environ, AGENTS_SMOKE_IMAP="pass"),
-                    timeout=60,
+                    timeout=30,
                 )
-                assert (proc.returncode == 0) == success, proc.stderr
+                assert (proc.returncode == 0) == success, (args, proc.stderr.decode())
                 return proc
 
-            initial = message("human@example.test", "build", "initial").split(
-                b"\r\n\r\n"
-            )[0]
-            initial += (
-                "\r\nMIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=parts\r\n\r\n"
-                "--parts\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n"
-                "A fulltext-payload for 评审.\r\n"
-                "--parts\r\nContent-Type: application/octet-stream\r\n"
-                "Content-Disposition: attachment; filename=notes.txt\r\n"
-                "Content-Transfer-Encoding: base64\r\n\r\naGVsbG8=\r\n--parts--\r\n"
-            ).encode()
-            append(imap_port, initial)
-            append(
-                imap_port,
-                message("human@example.test", "build", "followup").replace(
-                    b"\r\n\r\n",
-                    (
-                        f"\r\nReferences: <initial@example.test>\r\nReply-To: {REPLY_TO}\r\n"
-                        f"To: {MAILBOXES['build']}, {MAILBOXES['review']}\r\n"
-                        f"Cc: {MAILBOXES['review']}, {MAILBOXES['qa']}\r\n"
-                        f"Bcc: {MAILBOXES['audit']}\r\n\r\n"
-                    ).encode(),
-                ),
+            def mail(config, *args, **kwargs):
+                return cli(config, "mail", *args, **kwargs)
+
+            def search(config, term):
+                return json.loads(mail(config, "search", term).stdout)["messages"]
+
+            def reference(summary):
+                ref = summary["mail"]
+                return "--uid-validity", str(ref["uid_validity"]), str(ref["uid"])
+
+            raw = signed(job(BUILDER, "start", "PGP text 评审"), keys[HUMAN])
+            malformed = raw.replace(b"PGP text", b"PGP evil")
+            replay = raw.replace(b"<outer@example.test>", b"<replay@example.test>")
+            other = signed(job(REVIEWER, "other", "wrong target"), keys[HUMAN])
+            untrusted = signed(
+                job(BUILDER, "wrong-key", "untrusted certificate"),
+                keys[f"{BUILDER}/smime"],
             )
-            append(
-                imap_port,
-                message("human@example.test", "review", "private").replace(
-                    b"Do the work.", b"private-reviewer"
-                ),
+            pgp_mime = signed(
+                job(BUILDER, "pgpmime", "PGP MIME"), keys[HUMAN], detached=True
             )
-            cli("mail", "flush")
-            assert not smtp.sent, "new inbound mail must not start an agent"
-            # Leave only the initial request unread, so one pass runs one agent.
-            for agent, query in (
-                ("build", "followup@example.test"),
-                ("review", "private-reviewer"),
+            smime = signed(
+                job(
+                    BUILDER,
+                    "smime",
+                    "Detached S/MIME",
+                    "In-Reply-To: <start@example.test>\r\nReferences: <start@example.test>\r\n",
+                ),
+                keys[f"{HUMAN}/smime"],
+            )
+            unsigned = (
+                b"To: "
+                + BUILDER.encode()
+                + b"\r\nFrom: "
+                + HUMAN.encode()
+                + (
+                    b"\r\nX-Agents-Local-From: human@example.test\r\n"
+                    b"X-Agents-Envelope-To: agents+build@example.test\r\n"
+                    b"Subject: Unsigned\r\n\r\nAnonymous task"
+                )
+            )
+            for item in (
+                raw,
+                malformed,
+                replay,
+                other,
+                untrusted,
+                pgp_mime,
+                smime,
+                smime.replace(b"Detached S/MIME", b"Tampered S/MIME"),
+                unsigned,
             ):
-                found = json.loads(
-                    cli("mail", "search", "--agent", agent, query).stdout
-                )
-                ref = found["messages"][0]["mail"]
-                cli(
-                    "mail",
-                    "set-read",
-                    "--agent",
-                    agent,
-                    "--uid-validity",
-                    str(ref["uid_validity"]),
-                    str(ref["uid"]),
-                    "read",
-                )
-            assert cli("--once").stdout.strip() == "built"
-            assert not smtp.sent, "send_mail queues mail for flush"
-            cli("mail", "flush")
-            assert [item[:2] for item in smtp.sent] == [
-                (MAILBOXES["build"].encode(), MAILBOXES["review"].encode())
-            ]
-            assert cli("--once").stdout.strip() == "reviewed"
-            cli("mail", "flush")
-            assert len(smtp.sent) == 1, "a run must not automatically reply"
-
-            append(imap_port, message("human@example.test", "build", "retry"))
-            assert cli("--once").stdout.strip() == "built"
-            smtp.lose_ack = True
-            cli("mail", "flush", success=False)
-            pending = json.loads(cli("mail", "pending").stdout)
-            assert len(pending["queued"]) == 1 and not pending["rejected"], pending
-            with imap_login(imap_port) as connection:
-                connection.select("AgentOutbox", readonly=True)
-                entries = connection.uid(
-                    "FETCH",
-                    str(pending["queued"][0]),
-                    "(BODY.PEEK[HEADER.FIELDS (X-Agents-Queue)])",
-                )[1]
-                due = int(
-                    next(
-                        item[1] for item in entries if isinstance(item, tuple)
-                    ).split()[2]
-                )
-            if time.time() < due - 0.5:
-                cli("mail", "flush")
-                assert len(smtp.sent) == 2, "retry must wait until due"
-            time.sleep(max(0, due - time.time() + 0.2))
-            cli("mail", "flush")
-            assert len(smtp.sent) == 3, "lost 250 must be retried"
-            assert smtp.sent[1][2]["Message-ID"] == smtp.sent[2][2]["Message-ID"]
-            assert smtp.sent[2][2]["X-Agents-Queue"] is None
-            cli("mail", "flush")
-            assert not json.loads(cli("mail", "pending").stdout)["queued"]
-            assert len(smtp.sent) == 3
-
-            def mail_cli(command, *args, **kwargs):
-                return cli("mail", command, "--directory", project, *args, **kwargs)
-
-            first = json.loads(mail_cli("list", "--limit", "1").stdout)
-            second = json.loads(
-                mail_cli(
-                    "list",
-                    "--limit",
-                    "1",
-                    "--before-uid",
-                    str(first["next_before_uid"]),
-                ).stdout
+                append(imap_port, "build", item)
+            mail(build, "deliver", task=malformed, success=False)
+            mail(build, "deliver", "--recipient", REVIEWER, task=raw, success=False)
+            mail(
+                build,
+                "deliver",
+                "--unsigned",
+                "--recipient",
+                BUILDER,
+                task=unsigned,
+                success=False,
             )
-            assert first["messages"][0]["mail"] != second["messages"][0]["mail"]
-            ref = json.loads(mail_cli("search", "fulltext-payload").stdout)["messages"][
-                0
-            ]["mail"]
-            args = ("--uid-validity", str(ref["uid_validity"]), str(ref["uid"]))
-            assert "评审" in json.loads(mail_cli("get", *args).stdout)["body"]
-            assert len(json.loads(mail_cli("thread", *args).stdout)["messages"]) == 2
-            assert (
-                json.loads(mail_cli("attachment", *args, "0").stdout)["content_base64"]
-                == "aGVsbG8="
+            mail(build, "receive")
+            assert not smtp.sent
+            items = json.loads(mail(build, "list").stdout)["messages"]
+            assert len(items) == 3, items
+            assert all(
+                entry["from"] == HUMAN
+                and entry["authenticated"]
+                and entry["subject"] == "Work"
+                for entry in items
             )
-            mail_cli("get", "--agent", "review", *args, success=False)
-            mail_cli("set-read", *args, "unread")
-            assert json.loads(
-                mail_cli("search", "fulltext-payload", "--unread-only").stdout
+            (initial,) = search(build, "评审")
+            thread_items = json.loads(
+                mail(build, "thread", *reference(initial)).stdout
             )["messages"]
-            mail_cli("set-read", *args, "read")
+            assert len(thread_items) == 2, thread_items
+            assert cli(build, "--once").stdout.count(b"handled") == 3
+            assert not cli(build, "--once").stdout
+            assert not search(build, "Anonymous task")
+            mail(build, "deliver", task=replay)
+            assert len(search(build, "评审")) == 1
 
-            mail_cli(
+            (followup,) = search(build, "Detached S/MIME")
+            mail(build, "reply", *reference(followup), task=b"CLI reply")
+            mail(build, "flush")
+            assert smtp.sent[-1][:2] == (BUILDER, HUMAN)
+            assert smtp.sent[-1][2]["In-Reply-To"] == "<smime@example.test>"
+
+            mail(
+                build,
                 "send",
-                "--subject",
-                "Denied",
                 "--to",
-                "review",
-                "--cc",
-                "unapproved",
-                task="No",
-                success=False,
-            )
-            assert not json.loads(cli("mail", "pending").stdout)["queued"]
-            assert (
-                json.loads(
-                    mail_cli(
-                        "send",
-                        "--subject",
-                        "Group",
-                        "--to",
-                        "review",
-                        "--to",
-                        "qa",
-                        "--cc",
-                        "ops",
-                        "--bcc",
-                        "audit",
-                        task="Group mail",
-                    ).stdout
-                )["recipients"]
-                == 4
+                REVIEWER,
+                "--subject",
+                "Cross host",
+                task=b"Handle on review",
             )
             smtp.lose_ack = True
-            cli("mail", "flush", success=False)
-            group = smtp.sent[3:]
-            assert {entry[1].decode() for entry in group} == set(TARGETS)
-            assert len(group) == 4
-            queued = json.loads(cli("mail", "pending").stdout)["queued"]
-            assert len(queued) == 1
-            with imap_login(imap_port) as connection:
-                connection.select("AgentOutbox", readonly=True)
-                entries = connection.uid(
-                    "FETCH",
-                    str(queued[0]),
-                    "(BODY.PEEK[HEADER.FIELDS (X-Agents-Queue)])",
-                )[1]
-                due = int(
-                    next(
-                        item[1] for item in entries if isinstance(item, tuple)
-                    ).split()[2]
-                )
-            time.sleep(max(0, due - time.time() + 0.2))
-            cli("mail", "flush")
-            assert len(smtp.sent) == 8
-            assert smtp.sent[7][1] == group[0][1]
-            assert smtp.sent[7][2].as_bytes() == group[0][2].as_bytes()
-            assert len({entry[2]["Message-ID"] for entry in group}) == 1
-            for _, _, email_msg in group:
-                assert [a.addr_spec for a in email_msg["To"].addresses] == [
-                    MAILBOXES["review"],
-                    MAILBOXES["qa"],
-                ]
-                assert email_msg["Cc"].addresses[0].addr_spec == MAILBOXES["ops"]
-                assert email_msg["Bcc"] is None and email_msg["In-Reply-To"] is None
-                assert MAILBOXES["audit"] not in email_msg.as_string()
+            mail(build, "flush", success=False)
+            assert len(json.loads(mail(build, "pending").stdout)["queued"]) == 1
+            time.sleep(2.2)
+            mail(build, "flush")
+            first, duplicate = smtp.sent[-2:]
+            assert first[:2] == duplicate[:2] == (BUILDER, REVIEWER)
+            assert first[2]["Message-ID"] == duplicate[2]["Message-ID"]
+            assert duplicate[2].get_content_type() == "application/pkcs7-mime"
+            assert cli(review, "--once").stdout.count(b"handled") == 1
+            (reviewed,) = search(review, "Handle on review")
+            mail(review, "reply", *reference(reviewed), task=b"Back from review")
+            mail(review, "flush")
+            assert cli(build, "--once").stdout.count(b"handled") == 1
+            (reply,) = search(build, "Back from review")
+            assert reply["from"] == REVIEWER
 
-            follow = json.loads(mail_cli("search", "followup@example.test").stdout)[
-                "messages"
-            ][0]["mail"]
-            mail_cli(
+            configuration = json.loads(build.read_text())
+            configuration["mail"]["transport"]["allow_unsigned"] = True
+            build.write_text(json.dumps(configuration))
+            assert cli(build, "--once").stdout.count(b"handled") == 1
+            (anonymous,) = search(build, "Anonymous task")
+            assert not anonymous["authenticated"] and anonymous["from"] != HUMAN
+            error = mail(
+                build,
                 "reply",
-                "--uid-validity",
-                str(follow["uid_validity"]),
-                str(follow["uid"]),
-                task="CLI reply",
-            )
-            append(
-                imap_port,
-                message("human@example.test", "build", "mcp").replace(
-                    b"Do the work.", b"MCP reply."
-                ),
-            )
-            cli("--once")
-            cli("mail", "flush")
-            cli_reply, mcp_reply, blind_copy = smtp.sent[8:]
-            assert (
-                cli_reply[1] == REPLY_TO.encode()
-                and mcp_reply[1] == b"human@example.test"
-            )
-            assert cli_reply[2]["Cc"] is None
-            assert cli_reply[2]["Subject"] == "Re: Work"
-            assert cli_reply[2]["In-Reply-To"] == "<followup@example.test>"
-            assert (
-                cli_reply[2]["References"]
-                == "<initial@example.test> <followup@example.test>"
-            )
-            assert mcp_reply[2]["In-Reply-To"] == "<initial@example.test>"
-            assert mcp_reply[2]["References"] == "<initial@example.test>"
-            assert mcp_reply[2]["Message-ID"] == blind_copy[2]["Message-ID"]
-            assert blind_copy[1].decode() == MAILBOXES["audit"]
-            assert MAILBOXES["audit"] not in blind_copy[2].as_string()
-
-            mail_cli(
-                "send",
-                "--subject",
-                "Private",
-                "--bcc",
-                "audit",
-                task="Hidden recipient",
-            )
-            cli("mail", "flush")
-            assert smtp.sent[-1][1].decode() == MAILBOXES["audit"]
-            assert MAILBOXES["audit"] not in smtp.sent[-1][2].as_string()
-
-            count = len(smtp.sent)
-            mail_cli(
-                "reply",
-                "--all",
-                "--uid-validity",
-                str(follow["uid_validity"]),
-                str(follow["uid"]),
-                task="Reply all",
-            )
-            cli("mail", "flush")
-            replies = smtp.sent[count:]
-            assert len(replies) == 3
-            assert {entry[1].decode() for entry in replies} == {
-                REPLY_TO,
-                MAILBOXES["qa"],
-                MAILBOXES["review"],
-            }
-            for _, _, reply in replies:
-                assert [a.addr_spec for a in reply["Cc"].addresses] == [
-                    MAILBOXES["review"],
-                    MAILBOXES["qa"],
-                ]
-                assert (
-                    reply["Bcc"] is None
-                    and reply["In-Reply-To"] == "<followup@example.test>"
-                )
-
-            for field, header in [
-                (
-                    "unauthorized-reply-to",
-                    b"From: human@example.test\r\nReply-To: unauthorized@example.test",
-                ),
-                ("unauthorized-from", b"From: unauthorized@example.test"),
-            ]:
-                append(
-                    imap_port,
-                    message("human@example.test", "build", field).replace(
-                        b"\r\nFrom: human@example.test", b"\r\n" + header
-                    ),
-                )
-                denied = json.loads(mail_cli("search", f"{field}@example.test").stdout)[
-                    "messages"
-                ][0]["mail"]
-                error = mail_cli(
-                    "reply",
-                    "--uid-validity",
-                    str(denied["uid_validity"]),
-                    str(denied["uid"]),
-                    task="Do not send",
-                    success=False,
-                )
-                assert "reply recipient is not authorized" in error.stderr, error.stderr
-            assert not json.loads(cli("mail", "pending").stdout)["queued"]
-            monitor = "monitor@example.test"
-            archive = "archive@example.test"
-            (project / ".agents.d" / "90-observers.json").write_text(
-                json.dumps(
-                    {"mail": {"cc": [monitor], "bcc": [archive], "to": ["review"]}}
-                )
-            )
-            mail_cli(
-                "send",
-                "--to",
-                "qa",
-                "--subject",
-                "Denied by agent ID",
-                task="Do not send",
+                *reference(anonymous),
+                task=b"Do not reply",
                 success=False,
             )
-            mail_cli(
-                "send",
-                "--to",
-                "stranger@example.test",
-                "--subject",
-                "Denied by trust",
-                task="Do not send",
+            assert b"no trusted reply address" in error.stderr
+            assert not cli(build, "--once").stdout
+            mail(
+                build,
+                "deliver",
+                "--unsigned",
+                "--recipient",
+                BUILDER,
+                task=malformed,
                 success=False,
             )
-            count = len(smtp.sent)
-            report = json.loads(
-                mail_cli(
-                    "send",
-                    "--to",
-                    "human@example.test",
-                    "--subject",
-                    "Report",
-                    task="Done",
-                ).stdout
-            )
-            assert report["recipients"] == 3
-            cli("mail", "flush")
-            copies = smtp.sent[count:]
-            assert {entry[1].decode() for entry in copies} == {
-                "human@example.test",
-                monitor,
-                archive,
-            }
-            for _, _, copy in copies:
-                assert copy["Cc"].addresses[0].addr_spec == monitor
-                assert copy["Bcc"] is None and archive not in copy.as_string()
+            mail(build, "deliver", "--unsigned", "--recipient", BUILDER, task=unsigned)
+            assert cli(build, "--once").stdout.count(b"handled") == 1
         finally:
             smtp.shutdown()
             thread.join()
@@ -572,20 +509,6 @@ def build_binary():
     raise RuntimeError("Cargo did not report the agents executable")
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "binary", type=Path, nargs="?", help="use this binary instead of building"
-    )
-    args = parser.parse_args()
-    if os.geteuid() == 0:
-        parser.exit(1, "test-e2e: run as an unprivileged user\n")
-    binary = args.binary.resolve(strict=True) if args.binary else build_binary()
-    with dovecot() as port:
-        test(binary, port)
-    print("mail round trip passed")
-
-
 @contextmanager
 def dovecot():
     uid, gid = os.geteuid(), os.getegid()
@@ -598,7 +521,6 @@ def dovecot():
         with socket.socket() as listener:
             listener.bind(("127.0.0.1", 0))
             port = listener.getsockname()[1]
-
         config = Path(directory) / "dovecot.conf"
         # Dovecot's "unlimited" is not Darwin's RLIM_INFINITY, and macOS
         # rejects finite RLIMIT_DATA limits on Apple Silicon.
@@ -624,6 +546,7 @@ mail_path = "{directory}/Maildir"
 mail_uid = {uid}
 mail_gid = {gid}
 first_valid_uid = {uid}
+last_valid_uid = {uid}
 first_valid_gid = {gid}
 default_internal_user = {user}
 default_internal_group = {group}
@@ -667,6 +590,20 @@ service imap-login {{
                 except subprocess.TimeoutExpired:
                     process.kill()
                     process.wait()
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "binary", type=Path, nargs="?", help="use this binary instead of building"
+    )
+    args = parser.parse_args()
+    if os.geteuid() == 0:
+        parser.exit(1, "test-e2e: run as an unprivileged user\n")
+    binary = args.binary.resolve(strict=True) if args.binary else build_binary()
+    with dovecot() as port:
+        test(binary, port)
+    print("signed mail round trip passed")
 
 
 if __name__ == "__main__":

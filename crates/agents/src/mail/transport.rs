@@ -16,6 +16,8 @@ use std::{
 enum Security {
     #[default]
     Tls,
+    /// Upgrade a plaintext SMTP connection with mandatory STARTTLS.
+    Starttls,
     /// Test/local delivery only; requires a literal loopback address.
     Loopback,
 }
@@ -75,6 +77,10 @@ impl<T: Read + Write + Send> Stream for T {}
 pub fn connect(config: &Incoming, root: &Path) -> Result<Imap> {
     let endpoint = &config.endpoint;
     endpoint.check()?;
+    ensure!(
+        !matches!(endpoint.security, Security::Starttls),
+        "IMAP requires implicit TLS, not STARTTLS"
+    );
     let password = config.login.password.read(root)?;
     let stream =
         TcpStream::connect((endpoint.host.as_str(), endpoint.port)).context("connect to IMAP")?;
@@ -85,6 +91,7 @@ pub fn connect(config: &Incoming, root: &Path) -> Result<Imap> {
                 .connect(&endpoint.host, stream)
                 .context("establish IMAP TLS")?,
         ),
+        Security::Starttls => anyhow::bail!("IMAP requires implicit TLS, not STARTTLS"),
     };
     let mut client = imap::Client::new(stream);
     client.read_greeting().context("read IMAP greeting")?;
@@ -143,9 +150,17 @@ impl Imap {
     }
 
     pub fn message(&mut self, uid: u32) -> Result<Option<Vec<u8>>> {
+        self.fetch_message(uid, "(UID BODY.PEEK[])")
+    }
+
+    pub fn message_prefix(&mut self, uid: u32, bytes: usize) -> Result<Option<Vec<u8>>> {
+        self.fetch_message(uid, &format!("(UID BODY.PEEK[]<0.{bytes}>)"))
+    }
+
+    fn fetch_message(&mut self, uid: u32, query: &str) -> Result<Option<Vec<u8>>> {
         let data = self
             .session
-            .uid_fetch(uid.to_string(), "(UID BODY.PEEK[])")
+            .uid_fetch(uid.to_string(), query)
             .with_context(|| format!("fetch IMAP message UID {uid}"))?;
         Ok(data
             .iter()
@@ -217,6 +232,7 @@ pub fn submission(config: &Outgoing, root: &Path) -> Result<SmtpTransport> {
     endpoint.check()?;
     let mut builder = match endpoint.security {
         Security::Tls => SmtpTransport::relay(&endpoint.host)?,
+        Security::Starttls => SmtpTransport::starttls_relay(&endpoint.host)?,
         Security::Loopback => {
             ensure!(config.login.is_none(), "SMTP authentication requires TLS");
             SmtpTransport::builder_dangerous(&endpoint.host)

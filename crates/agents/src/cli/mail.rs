@@ -254,12 +254,15 @@ pub(super) enum Action {
     Flush,
     /// List pending, expired or rejected deliveries.
     Pending,
-    /// Store a message on stdin with envelope details verified by the local operator or gateway.
+    /// Import unread IMAP mail without launching an agent.
+    Receive,
+    /// Verify and import an RFC 5322 message on stdin.
     Deliver {
         #[arg(long)]
-        recipient: MailAddress,
+        recipient: Option<MailAddress>,
+        /// Import a genuinely unsigned message; requires mail.transport.allow_unsigned.
         #[arg(long)]
-        authenticated_from: MailAddress,
+        unsigned: bool,
     },
 }
 
@@ -283,13 +286,20 @@ impl Action {
                 print_json(&mail::pending(&workspace)?)?;
                 Ok(ExitCode::SUCCESS)
             }
+            Self::Receive => {
+                mail::ImapIngress::default().poll(&workspace, &workspace.mail_routes()?)?;
+                Ok(ExitCode::SUCCESS)
+            }
             Self::Deliver {
                 recipient,
-                authenticated_from,
+                unsigned,
             } => {
                 let mut raw = Vec::new();
-                io::stdin().lock().read_to_end(&mut raw)?;
-                mail::deliver(&workspace, &recipient, &authenticated_from, &raw)?;
+                io::stdin()
+                    .lock()
+                    .take(8 * 1024 * 1024 + 1)
+                    .read_to_end(&mut raw)?;
+                mail::deliver(&workspace, recipient.as_ref(), unsigned, &raw)?;
                 Ok(ExitCode::SUCCESS)
             }
         }

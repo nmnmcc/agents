@@ -1,7 +1,8 @@
+use hopf_mailbox::{AppendGuard, IndexConfig, MboxMailbox};
 use serde_json::{Value, json};
 use std::{
+    collections::BTreeSet,
     fs,
-    io::Write,
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     process::{Command, Output, Stdio},
@@ -20,24 +21,48 @@ pub(super) fn local_mail() -> Value {
 
 /// Delivers `body` from the trusted human to `agent`, then makes one watcher pass.
 pub(super) fn handle_mail(command: impl Fn() -> Command, agent: &str, body: &str) -> Output {
-    let mut deliver = command()
-        .args(["mail", "deliver", "--recipient"])
-        .arg(format!("{agent}@example.test"))
-        .args(["--authenticated-from", "human@example.test"])
-        .stdin(Stdio::piped())
-        .spawn()
+    let cwd = command();
+    let root = cwd
+        .get_current_dir()
+        .unwrap()
+        .ancestors()
+        .find(|path| path.join(".agents.json").is_file())
         .unwrap();
-    write!(
-        deliver.stdin.take().unwrap(),
-        "From: human@example.test\r\nSubject: Task\r\n\r\n{body}\r\n"
-    )
-    .unwrap();
-    assert!(deliver.wait().unwrap().success());
+    local_message(
+        root,
+        &format!("{agent}@example.test"),
+        "human@example.test",
+        &format!("From: human@example.test\r\nSubject: Task\r\n\r\n{body}\r\n"),
+    );
     command()
         .arg("--once")
         .stdin(Stdio::null())
         .output()
         .unwrap()
+}
+
+/// Seed the private post-verification store, without using external crypto in CLI tests.
+pub(super) fn local_message(root: &Path, to: &str, from: &str, raw: &str) {
+    let directory = root.join(".agents/mail");
+    fs::create_dir_all(&directory).unwrap();
+    fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
+    let path = directory.join("inbox.mbox");
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .unwrap();
+    file.set_permissions(fs::Permissions::from_mode(0o600))
+        .unwrap();
+    let mut mailbox =
+        MboxMailbox::open(&path, "inbox.mbox", false, IndexConfig::default()).unwrap();
+    let mut append = AppendGuard::start(&mut mailbox, &BTreeSet::new(), None).unwrap();
+    append
+        .append_content(
+            format!("X-Agents-Local-To: {to}\r\nX-Agents-Local-From: {from}\r\n{raw}").as_bytes(),
+        )
+        .unwrap();
+    append.commit().unwrap();
 }
 
 pub(super) fn sample_project() -> PathBuf {

@@ -242,6 +242,11 @@ impl LocatedProject {
             config.agent,
             root.display()
         );
+        config
+            .mail
+            .transport
+            .check()
+            .context("invalid mail transport configuration")?;
         Ok(Some(Self {
             root: root.to_owned(),
             config,

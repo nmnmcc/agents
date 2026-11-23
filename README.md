@@ -158,28 +158,102 @@ delivered headers.
 
 ## Exchange mail with people
 
-Use addresses your mail server routes to and authorizes for submission.
-Keep local mbox storage and configure `mail.transport.smtp` for outgoing
-mail, or also set `mail.transport.imap` and `mail.transport.outbox` to use
-external storage. See the [mail sample](samples/mail.agents.json) for SMTP.
-For IMAP, use a dedicated inbox and private outbox; the outbox must support
-permanent custom keywords.
+Use addresses your provider routes to and authorizes for submission.
+`agents` polls an ordinary IMAP folder and authenticates external mail with
+**OpenPGP or S/MIME**. It does not listen on a mail port or require a
+gateway. IMAP and SMTP passwords log in to the provider; they do not
+authenticate the person sending a task.
 
-With local storage, have a trusted gateway deposit incoming mail. This is
-also how a person on the same machine hands an agent a saved message:
-
-```sh
-agents mail deliver --recipient reviewer@example.test \
-  --authenticated-from maintainer@example.test < message.eml
+```yaml
+mail:
+  address: "xxx.agent+xxx@nmnm.cc"
+  trust: ["maintainer@example.test"]
+  transport:
+    imap:
+      endpoint: { host: imap.mail.me.com, port: 993 }
+      login:
+        username: "<iCloud IMAP login>"
+        password: { file: "/home/agent/.config/agents/icloud-password" }
+      mailbox: INBOX
+    smtp:
+      endpoint: { host: smtp.mail.me.com, port: 587, security: starttls }
+      login:
+        username: "<iCloud SMTP login>"
+        password: { file: "/home/agent/.config/agents/icloud-password" }
+    signatures:
+      openpgp_keyring: "/home/agent/.config/agents/trusted.gpg"
+      trusted:
+        - method: openpgp
+          address: "maintainer@example.test"
+          fingerprint: "<OpenPGP primary-key fingerprint>"
+        - method: smime
+          address: "maintainer@example.test"
+          fingerprint: "<SHA-256 certificate fingerprint>"
+      signing:
+        "xxx.agent+xxx@nmnm.cc":
+          method: smime
+          certificate: "/home/agent/.config/agents/signing.pem"
+          key: "/home/agent/.config/agents/signing-key.pem"
 ```
 
-`agents` listens on no mail ports and does not authenticate mail itself.
-The gateway must verify the sender independently; `From`, an SMTP
-envelope sender, or SPF alone is not an authenticated mailbox identity.
-Strip all incoming `X-Agents-Envelope-To` and `X-Agents-Authenticated-From`
-headers. `deliver` rejects messages containing either header and stamps
-its own. A gateway writing directly to IMAP must stamp exactly one of
-each itself; never use an inbox where untrusted parties can write them.
+Use the provider's app-specific password where required. Check with your
+provider that the full address (including any `+tag`) can receive mail and
+can be used as an SMTP sender; these permissions are separate. For received
+OpenPGP mail, export trusted public keys to the binary keyring using
+`gpg --export <fingerprint> > trusted.gpg`. For S/MIME, obtain the leaf
+fingerprint with `openssl x509 -in signer.pem -noout -sha256 -fingerprint`.
+The exact pinned certificate, not the public CA store or `From`, identifies
+the signer. Remove obsolete pins when replacing a certificate or key.
+
+Send signed mail with this text **inside the signed part**, followed by a
+blank line and the task:
+
+```text
+Agent-To: xxx.agent+xxx@nmnm.cc
+Task-ID: 550e8400-e29b-41d4-a716-446655440000@example.test
+Subject: Review this change
+
+Please check the new tests.
+```
+
+Use a new `Task-ID` for each new task. Optional `In-Reply-To` and
+`References` fields use message IDs in angle brackets to continue a thread.
+The outer address is still used for mail delivery, but outer sender,
+subject, reply and thread headers don't establish identity or affect the
+imported task. Supported input is OpenPGP/MIME, a standalone clear-signed
+text body, or detached/opaque S/MIME with a signed plain-text part. The
+importer does not expose attachments or decrypt encrypted mail.
+
+```sh
+agents mail receive                  # Import unread IMAP mail without running agents
+agents mail deliver < message.eml    # Verify and import a saved message
+agents --once                        # Import, flush, and run one pass
+```
+
+The source folder is not modified. Accepted mail and replay records are
+kept in the project's private local inbox. The outbox is local by default;
+an optional `mail.transport.outbox` names a separate private IMAP folder
+that supports permanent custom keywords. SMTP deliveries are signed per
+recipient with the sending agent's configured identity. For OpenPGP
+sending, use `signing.<address>: { method: openpgp, fingerprint: "...",
+home: "/path/to/private/gnupg-home" }`. Protect private files and make sure
+the service can sign without an interactive prompt. Non-Nix installations
+need GnuPG for OpenPGP and the OpenSSL CLI for S/MIME on `PATH`.
+
+### Optional unsigned ingress
+
+`mail.transport.allow_unsigned: true` permits unsigned IMAP mail addressed
+to exactly one local agent in `To` or `Cc`, and enables explicit local
+import with `agents mail deliver --unsigned --recipient <address>`.
+**Anyone who can reach that mailbox can trigger the agent.** Leave it off
+on public or shared inboxes unless this is intentional. Such messages do
+not establish a reply identity or resume an existing session. Mail that
+still presents a signature but fails validation is not downgraded.
+
+When upgrading from 0.1, remove the old gateway integration. Neither the
+gateway headers nor `mail deliver --authenticated-from` are accepted as
+proof of identity. Archive the old inbox if you need its history; records
+in the old gateway format are not imported into the new inbox view.
 
 - `mail.from` and `mail.to` restrict agent senders and recipients by ID.
   Agent-level rules can narrow project rules. Omission means unrestricted;
@@ -321,8 +395,9 @@ devenv test                                  # Run both Rust tests and E2E
 ```
 
 Run the E2E test as a regular user. It builds the locked workspace, starts
-Dovecot and a test SMTP server on loopback, and uses a fake harness. It needs
-no Docker, root privileges, real mail accounts, or harness login.
+Dovecot and a test SMTP server on loopback, generates test signing keys and
+certificates, and uses a fake harness. It needs no Docker, root privileges,
+real mail accounts, or harness login.
 
 Source layout, under `crates/agents/src/`:
 

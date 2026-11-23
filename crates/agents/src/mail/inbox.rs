@@ -10,8 +10,10 @@ use mail_parser::{Address, HeaderValue, Message, MessageParser, MimeHeaders};
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
 
-const ENVELOPE_TO: &str = "X-Agents-Envelope-To";
-const AUTHENTICATED_FROM: &str = "X-Agents-Authenticated-From";
+pub(super) const LOCAL_TO: &str = "X-Agents-Local-To";
+pub(super) const LOCAL_FROM: &str = "X-Agents-Local-From";
+pub(super) const UNSIGNED: &str = "X-Agents-Local-Unsigned";
+pub(super) const INGESTED: &str = "X-Agents-Local-Imported";
 
 pub struct Inbox<'a> {
     folder: Folder,
@@ -66,18 +68,20 @@ impl<'a> Inbox<'a> {
     }
 
     fn visible(&self, message: &Message<'_>) -> bool {
-        unique_header(message, ENVELOPE_TO)
+        unique_header(message, LOCAL_TO)
             .ok()
             .flatten()
             .and_then(|value| value.parse::<MailAddress>().ok())
             .is_some_and(|address| address.matches(&self.address))
-            && authenticated_sender(message).is_ok_and(|sender| self.incoming.allows(&sender, true))
+            && (is_unsigned(message)
+                || authenticated_sender(message)
+                    .is_ok_and(|sender| self.incoming.allows(&sender, true)))
     }
 
     fn candidates(&mut self, extra: &str, unread: bool, before: Option<u32>) -> Result<Vec<u32>> {
         let address = quoted(&self.address.to_string())?;
         let query = format!(
-            "UNDELETED {} HEADER {ENVELOPE_TO} {address} {extra}",
+            "UNDELETED {} HEADER {LOCAL_TO} {address} {extra}",
             if unread { "UNSEEN" } else { "" },
         );
         let mut uids =
@@ -111,6 +115,13 @@ impl<'a> Inbox<'a> {
 
     pub fn event(&mut self, mail: MailRef) -> Result<MailEvent> {
         self.inspect(mail, |_, message| {
+            if is_unsigned(message) {
+                return Ok(MailEvent {
+                    mail,
+                    sender: "unsigned".into(),
+                    ids: Vec::new(),
+                });
+            }
             let mut ids = message_ids(message.references());
             ids.extend(message_ids(message.in_reply_to()));
             ids.extend(unique_header(message, "Message-ID")?.and_then(super::outbox::message_id));
@@ -220,8 +231,8 @@ impl<'a> Inbox<'a> {
         let flags = self.folder.flags(uid)?;
         Ok(json!({
             "mail": MailRef { uid, uid_validity: self.validity },
-            "from": unique_header(message, AUTHENTICATED_FROM).ok().flatten()
-                .or_else(|| message.from().and_then(|from| from.first()).and_then(|from| from.address())),
+            "from": unique_header(message, LOCAL_FROM).ok().flatten(),
+            "authenticated": !is_unsigned(message),
             "subject": message.subject(),
             "date": message.date().map(|date| date.to_rfc3339()),
             "unread": !flags.iter().any(|flag| flag.eq_ignore_ascii_case("\\Seen")),
@@ -235,6 +246,10 @@ impl<'a> Inbox<'a> {
 
     pub fn reply(&mut self, id: MailRef, all: bool) -> Result<Reply> {
         self.inspect(id, |_, message| {
+            ensure!(
+                !is_unsigned(message),
+                "unsigned mail has no trusted reply address"
+            );
             let authenticated_sender = authenticated_sender(message)?;
             let reply_to_count = message
                 .headers()
@@ -374,11 +389,15 @@ pub fn unique_header<'a>(message: &'a Message<'_>, name: &str) -> Result<Option<
     ))
 }
 
-fn authenticated_sender(message: &Message<'_>) -> Result<MailAddress> {
-    unique_header(message, AUTHENTICATED_FROM)?
+pub(super) fn authenticated_sender(message: &Message<'_>) -> Result<MailAddress> {
+    unique_header(message, LOCAL_FROM)?
         .context("mail has no authenticated sender")?
         .parse()
         .map_err(anyhow::Error::msg)
+}
+
+fn is_unsigned(message: &Message<'_>) -> bool {
+    matches!(unique_header(message, UNSIGNED), Ok(Some("yes")))
 }
 
 fn thread_root<'a>(message: &'a Message<'_>) -> Option<&'a str> {

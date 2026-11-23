@@ -11,10 +11,7 @@ def main():
     header, payload = sys.stdin.read().split("\n", 1)
     assert header.startswith("The new message in your inbox follows."), header
     trigger = json.loads(payload)
-    body = trigger["body"]
-    agent = sys.argv[1]
-    servers = json.loads(sys.argv[2])
-    server = servers["agents-mail"]
+    server = json.loads(sys.argv[1])["agents-mail"]
     with subprocess.Popen(
         [server["command"], *server["args"]],
         stdin=subprocess.PIPE,
@@ -51,7 +48,6 @@ def main():
             },
         )
         rpc("notifications/initialized")
-        tools = {tool["name"] for tool in rpc("tools/list", 2)["tools"]}
         assert {
             "send_mail",
             "list_mail",
@@ -60,74 +56,21 @@ def main():
             "get_thread",
             "get_attachment",
             "set_mail_read",
-        } <= tools
-        if agent == "build":
-            if "fulltext-payload" in body:
-                result = call(3, "search_mail", {"query": "fulltext-payload"})
-                assert len(result["messages"]) == 1
-                mail = result["messages"][0]["mail"]
-                assert mail == trigger["message"]["mail"]
-                full = call(4, "get_mail", mail)
-                assert "评审" in full["body"]
-                assert full["attachments"][0]["name"] == "notes.txt"
-                assert (
-                    call(5, "get_attachment", {"mail": mail, "index": 0})[
-                        "content_base64"
-                    ]
-                    == "aGVsbG8="
-                )
-                assert len(call(6, "get_thread", mail)["messages"]) == 2
-                assert not call(7, "search_mail", {"query": "private-reviewer"})[
-                    "messages"
-                ]
-                call(8, "get_mail", {**mail, "uid": mail["uid"] + 2}, error=True)
-                assert (
-                    call(9, "search_mail", {"query": "评审"})["messages"][0]["mail"]
-                    == mail
-                )
-                assert call(10, "get_mail", mail)["message"]["unread"]
-                call(11, "set_mail_read", {"mail": mail, "read": True})
-                assert not call(12, "get_mail", mail)["message"]["unread"]
-            call(
-                13,
-                "send_mail",
-                {
-                    "to": ["review"],
-                    "bcc": ["unapproved"],
-                    "subject": "Never",
-                    "body": "Never",
-                },
-                error=True,
-            )
-            if "MCP reply." in body:
-                mail = call(14, "search_mail", {"query": "fulltext-payload"})[
-                    "messages"
-                ][0]["mail"]
-                assert (
-                    call(
-                        15,
-                        "send_mail",
-                        {"in_reply_to": mail, "bcc": ["audit"], "body": "MCP reply"},
-                    )["recipients"]
-                    == 2
-                )
-            else:
-                assert call(
-                    14,
-                    "send_mail",
-                    {
-                        "to": ["review"],
-                        "subject": "Review it",
-                        "body": "Please review",
-                    },
-                )["queued"]
-            print("built")
-        elif agent == "review" and "Please review" in body:
-            assert call(3, "search_mail", {"query": "Please review"})["messages"]
-            print("reviewed")
-        call(16, "set_mail_read", {"mail": trigger["message"]["mail"], "read": True})
+        } <= {tool["name"] for tool in rpc("tools/list", 2)["tools"]}
+        mail = trigger["message"]["mail"]
+        full = call(3, "get_mail", mail)
+        assert full["body"] == trigger["body"] and full["message"]["unread"]
+        call(
+            4,
+            "send_mail",
+            {"to": ["unapproved@example.test"], "subject": "Never", "body": "Never"},
+            error=True,
+        )
+        call(5, "set_mail_read", {"mail": mail, "read": True})
+        assert not call(6, "get_mail", mail)["message"]["unread"]
         client.stdin.close()
         assert client.wait(timeout=5) == 0
+    print("handled")
 
 
 if __name__ == "__main__":

@@ -1,4 +1,4 @@
-use super::support::{Fixture, copy_sample_harness_layer};
+use super::support::{Fixture, copy_sample_harness_layer, local_message};
 use serde_json::{Value, json};
 use std::{fs, io::Write, os::unix::fs::PermissionsExt, process::Stdio};
 
@@ -103,25 +103,12 @@ printf '\nfinished builder %s %s\n' "$id" "$resume"
     fixture.save();
 
     let deliver = |sender: &str, subject: &str, thread_headers: &str| {
-        let mut child = fixture
-            .command()
-            .args([
-                "mail",
-                "deliver",
-                "--recipient",
-                "builder@example.test",
-                "--authenticated-from",
-                sender,
-            ])
-            .stdin(Stdio::piped())
-            .spawn()
-            .unwrap();
-        write!(
-            child.stdin.take().unwrap(),
-            "From: {sender}\r\nSubject: {subject}\r\n{thread_headers}\r\nHello\r\n"
-        )
-        .unwrap();
-        assert!(child.wait().unwrap().success());
+        local_message(
+            &fixture.root,
+            "builder@example.test",
+            sender,
+            &format!("From: {sender}\r\nSubject: {subject}\r\n{thread_headers}\r\nHello\r\n"),
+        );
     };
     deliver(
         "human@example.test",
@@ -372,14 +359,10 @@ fn local_mbox_delivers_reads_filters_and_replies_without_a_server() {
     assert_eq!(reply["messages"][0]["subject"], "Re: Work");
 
     for sender in ["human@example.test", "stranger@example.test"] {
-        checked(
-            &[
-                "deliver",
-                "--recipient",
-                "builder@example.test",
-                "--authenticated-from",
-                sender,
-            ],
+        local_message(
+            &fixture.root,
+            "builder@example.test",
+            sender,
             "From: human@example.test\r\nSubject: Note\r\n\r\nHuman note\r\n",
         );
     }
@@ -389,14 +372,10 @@ fn local_mbox_delivers_reads_filters_and_replies_without_a_server() {
         1,
         "only trusted humans are visible"
     );
-    checked(
-        &[
-            "deliver",
-            "--recipient",
-            "builder@example.test",
-            "--authenticated-from",
-            "builder@example.test",
-        ],
+    local_message(
+        &fixture.root,
+        "builder@example.test",
+        "builder@example.test",
         "From: builder@example.test\r\nSubject: Excluded agent\r\n\r\nExcluded agent\r\n",
     );
     assert_eq!(

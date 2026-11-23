@@ -1,5 +1,5 @@
 use super::{
-    inbox::unique_header,
+    inbox::{LOCAL_FROM, LOCAL_TO, unique_header},
     retry,
     store::Folder,
     transport::{self, Submission},
@@ -73,15 +73,7 @@ pub fn flush(workspace: &Workspace) -> Result<()> {
         if entry.due > now {
             continue;
         }
-        let local = if store.is_local() {
-            routes
-                .route(&to)
-                .ok()
-                .map(Workspace::at_mailbox)
-                .filter(|target| target.mail().imap.is_none())
-        } else {
-            None
-        };
+        let local = routes.route(&to).ok().map(Workspace::at_mailbox);
         let outcome = if let Some(target) = local {
             let mut inbox = target
                 .mail()
@@ -89,6 +81,18 @@ pub fn flush(workspace: &Workspace) -> Result<()> {
             inbox.append(None, &stamp(&to, &from, entry.message)?)?;
             Submission::Accepted
         } else if let Some(config) = &mail.smtp {
+            let signed =
+                match mail
+                    .signatures
+                    .sign(workspace.root(), &from, &to, &id, entry.message)
+                {
+                    Ok(signed) => signed,
+                    Err(error) => {
+                        eprintln!("agents: cannot sign outbox UID {uid}: {error:#}");
+                        failed = true;
+                        continue;
+                    }
+                };
             if smtp.is_none() {
                 smtp = Some(transport::submission(config, workspace.root())?);
             }
@@ -96,7 +100,7 @@ pub fn flush(workspace: &Workspace) -> Result<()> {
                 smtp.as_ref().expect("SMTP initialized"),
                 &from.to_string(),
                 &to.to_string(),
-                entry.message,
+                &signed,
             )?
         } else {
             eprintln!("agents: SMTP is not configured for outbox UID {uid}; mail remains queued");
@@ -139,34 +143,17 @@ fn append(store: &mut Folder, entry: &[u8]) -> Result<()> {
     store.append((!store.is_local()).then_some(READY), entry)
 }
 
-pub fn deliver(
-    workspace: &Workspace,
-    to: &MailAddress,
-    from: &MailAddress,
-    raw: &[u8],
-) -> Result<()> {
-    let routes = workspace.mail_routes()?;
-    let target = Workspace::at_mailbox(routes.route(to)?);
-    let stamped = stamp(to, from, raw)?;
-    target
-        .mail()
-        .open(target.root(), target.mail_directory(), false)?
-        .append(None, &stamped)
-}
-
-fn stamp(to: &MailAddress, from: &MailAddress, raw: &[u8]) -> Result<Vec<u8>> {
+pub(super) fn stamp(to: &MailAddress, from: &MailAddress, raw: &[u8]) -> Result<Vec<u8>> {
     let message = MessageParser::default()
         .parse(raw)
         .context("invalid RFC 5322 mail")?;
-    for name in ["X-Agents-Envelope-To", "X-Agents-Authenticated-From"] {
+    for name in [LOCAL_TO, LOCAL_FROM] {
         ensure!(
             unique_header(&message, name)?.is_none(),
             "message already contains {name}"
         );
     }
-    let mut stamped =
-        format!("X-Agents-Envelope-To: {to}\r\nX-Agents-Authenticated-From: {from}\r\n")
-            .into_bytes();
+    let mut stamped = format!("{LOCAL_TO}: {to}\r\n{LOCAL_FROM}: {from}\r\n").into_bytes();
     stamped.extend_from_slice(raw);
     Ok(stamped)
 }

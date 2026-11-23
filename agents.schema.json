@@ -519,8 +519,13 @@
     "MailConfig": {
       "type": "object",
       "properties": {
+        "allow_unsigned": {
+          "description": "Allow unsigned mail to trigger agents. It cannot establish a reply or session identity.",
+          "type": "boolean",
+          "default": false
+        },
         "imap": {
-          "description": "Dedicated mailbox written only by a gateway that replaces the envelope recipient stamp.",
+          "description": "Ordinary IMAP inbox to poll for incoming jobs.",
           "anyOf": [
             {
               "$ref": "#/$defs/Incoming"
@@ -533,7 +538,7 @@
         "outbox": {
           "anyOf": [
             {
-              "description": "An IMAP outbox folder, defaulting to AgentOutbox when IMAP is configured.",
+              "description": "Optional private IMAP queue. By default the outbox is stored locally.",
               "type": [
                 "string",
                 "null"
@@ -549,6 +554,9 @@
         },
         "retry": {
           "$ref": "#/$defs/Policy"
+        },
+        "signatures": {
+          "$ref": "#/$defs/Signatures"
         },
         "smtp": {
           "anyOf": [
@@ -609,6 +617,23 @@
         },
         {
           "$ref": "#/$defs/Mcp"
+        }
+      ]
+    },
+    "Method": {
+      "anyOf": [
+        {
+          "type": "string",
+          "enum": [
+            "openpgp",
+            "smime"
+          ]
+        },
+        {
+          "$ref": "#/$defs/EnvReference"
+        },
+        {
+          "$ref": "#/$defs/FileReference"
         }
       ]
     },
@@ -1372,8 +1397,13 @@
             "transport": {
               "type": "object",
               "properties": {
+                "allow_unsigned": {
+                  "description": "Allow unsigned mail to trigger agents. It cannot establish a reply or session identity.",
+                  "type": "boolean",
+                  "default": false
+                },
                 "imap": {
-                  "description": "Dedicated mailbox written only by a gateway that replaces the envelope recipient stamp.",
+                  "description": "Ordinary IMAP inbox to poll for incoming jobs.",
                   "type": [
                     "object",
                     "null"
@@ -1410,6 +1440,21 @@
                                   "enum": [
                                     "tls"
                                   ]
+                                },
+                                {
+                                  "$ref": "#/$defs/EnvReference"
+                                },
+                                {
+                                  "$ref": "#/$defs/FileReference"
+                                }
+                              ]
+                            },
+                            {
+                              "anyOf": [
+                                {
+                                  "description": "Upgrade a plaintext SMTP connection with mandatory STARTTLS.",
+                                  "type": "string",
+                                  "const": "starttls"
                                 },
                                 {
                                   "$ref": "#/$defs/EnvReference"
@@ -1503,7 +1548,7 @@
                 "outbox": {
                   "anyOf": [
                     {
-                      "description": "An IMAP outbox folder, defaulting to AgentOutbox when IMAP is configured.",
+                      "description": "Optional private IMAP queue. By default the outbox is stored locally.",
                       "type": [
                         "string",
                         "null"
@@ -1537,6 +1582,184 @@
                       "format": "uint64",
                       "default": 300,
                       "minimum": 1
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "signatures": {
+                  "type": "object",
+                  "properties": {
+                    "openpgp_keyring": {
+                      "anyOf": [
+                        {
+                          "description": "Public keys exported with `gpg --export` (a binary keyring).",
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        {
+                          "$ref": "#/$defs/EnvReference"
+                        },
+                        {
+                          "$ref": "#/$defs/FileReference"
+                        }
+                      ]
+                    },
+                    "signing": {
+                      "description": "Private signing identity indexed by the agent email address.",
+                      "type": "object",
+                      "additionalProperties": {
+                        "anyOf": [
+                          {
+                            "type": "object",
+                            "properties": {
+                              "fingerprint": {
+                                "anyOf": [
+                                  {
+                                    "type": "string"
+                                  },
+                                  {
+                                    "$ref": "#/$defs/EnvReference"
+                                  },
+                                  {
+                                    "$ref": "#/$defs/FileReference"
+                                  }
+                                ]
+                              },
+                              "home": {
+                                "anyOf": [
+                                  {
+                                    "description": "Private GnuPG home containing the signing key.",
+                                    "type": "string"
+                                  },
+                                  {
+                                    "$ref": "#/$defs/EnvReference"
+                                  },
+                                  {
+                                    "$ref": "#/$defs/FileReference"
+                                  }
+                                ]
+                              },
+                              "method": {
+                                "anyOf": [
+                                  {
+                                    "type": "string",
+                                    "const": "openpgp"
+                                  },
+                                  {
+                                    "$ref": "#/$defs/EnvReference"
+                                  },
+                                  {
+                                    "$ref": "#/$defs/FileReference"
+                                  }
+                                ]
+                              }
+                            },
+                            "additionalProperties": false
+                          },
+                          {
+                            "type": "object",
+                            "properties": {
+                              "certificate": {
+                                "anyOf": [
+                                  {
+                                    "type": "string"
+                                  },
+                                  {
+                                    "$ref": "#/$defs/EnvReference"
+                                  },
+                                  {
+                                    "$ref": "#/$defs/FileReference"
+                                  }
+                                ]
+                              },
+                              "key": {
+                                "anyOf": [
+                                  {
+                                    "type": "string"
+                                  },
+                                  {
+                                    "$ref": "#/$defs/EnvReference"
+                                  },
+                                  {
+                                    "$ref": "#/$defs/FileReference"
+                                  }
+                                ]
+                              },
+                              "method": {
+                                "anyOf": [
+                                  {
+                                    "type": "string",
+                                    "const": "smime"
+                                  },
+                                  {
+                                    "$ref": "#/$defs/EnvReference"
+                                  },
+                                  {
+                                    "$ref": "#/$defs/FileReference"
+                                  }
+                                ]
+                              }
+                            },
+                            "additionalProperties": false
+                          }
+                        ]
+                      }
+                    },
+                    "trusted": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "address": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "format": "email"
+                              },
+                              {
+                                "$ref": "#/$defs/EnvReference"
+                              },
+                              {
+                                "$ref": "#/$defs/FileReference"
+                              }
+                            ]
+                          },
+                          "fingerprint": {
+                            "anyOf": [
+                              {
+                                "description": "OpenPGP primary-key fingerprint or SHA-256 fingerprint of an S/MIME certificate.",
+                                "type": "string"
+                              },
+                              {
+                                "$ref": "#/$defs/EnvReference"
+                              },
+                              {
+                                "$ref": "#/$defs/FileReference"
+                              }
+                            ]
+                          },
+                          "method": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "enum": [
+                                  "openpgp",
+                                  "smime"
+                                ]
+                              },
+                              {
+                                "$ref": "#/$defs/EnvReference"
+                              },
+                              {
+                                "$ref": "#/$defs/FileReference"
+                              }
+                            ]
+                          }
+                        },
+                        "additionalProperties": false
+                      }
                     }
                   },
                   "additionalProperties": false
@@ -1578,6 +1801,21 @@
                                   "enum": [
                                     "tls"
                                   ]
+                                },
+                                {
+                                  "$ref": "#/$defs/EnvReference"
+                                },
+                                {
+                                  "$ref": "#/$defs/FileReference"
+                                }
+                              ]
+                            },
+                            {
+                              "anyOf": [
+                                {
+                                  "description": "Upgrade a plaintext SMTP connection with mandatory STARTTLS.",
+                                  "type": "string",
+                                  "const": "starttls"
                                 },
                                 {
                                   "$ref": "#/$defs/EnvReference"
@@ -2076,6 +2314,21 @@
         {
           "anyOf": [
             {
+              "description": "Upgrade a plaintext SMTP connection with mandatory STARTTLS.",
+              "type": "string",
+              "const": "starttls"
+            },
+            {
+              "$ref": "#/$defs/EnvReference"
+            },
+            {
+              "$ref": "#/$defs/FileReference"
+            }
+          ]
+        },
+        {
+          "anyOf": [
+            {
               "description": "Test/local delivery only; requires a literal loopback address.",
               "type": "string",
               "const": "loopback"
@@ -2213,6 +2466,149 @@
         "read"
       ]
     },
+    "Signatures": {
+      "type": "object",
+      "properties": {
+        "openpgp_keyring": {
+          "anyOf": [
+            {
+              "description": "Public keys exported with `gpg --export` (a binary keyring).",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            {
+              "$ref": "#/$defs/EnvReference"
+            },
+            {
+              "$ref": "#/$defs/FileReference"
+            }
+          ]
+        },
+        "signing": {
+          "description": "Private signing identity indexed by the agent email address.",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/Signing"
+          }
+        },
+        "trusted": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Trusted"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "Signing": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "fingerprint": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "$ref": "#/$defs/EnvReference"
+                },
+                {
+                  "$ref": "#/$defs/FileReference"
+                }
+              ]
+            },
+            "home": {
+              "anyOf": [
+                {
+                  "description": "Private GnuPG home containing the signing key.",
+                  "type": "string"
+                },
+                {
+                  "$ref": "#/$defs/EnvReference"
+                },
+                {
+                  "$ref": "#/$defs/FileReference"
+                }
+              ]
+            },
+            "method": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "const": "openpgp"
+                },
+                {
+                  "$ref": "#/$defs/EnvReference"
+                },
+                {
+                  "$ref": "#/$defs/FileReference"
+                }
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "method",
+            "fingerprint",
+            "home"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "certificate": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "$ref": "#/$defs/EnvReference"
+                },
+                {
+                  "$ref": "#/$defs/FileReference"
+                }
+              ]
+            },
+            "key": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "$ref": "#/$defs/EnvReference"
+                },
+                {
+                  "$ref": "#/$defs/FileReference"
+                }
+              ]
+            },
+            "method": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "const": "smime"
+                },
+                {
+                  "$ref": "#/$defs/EnvReference"
+                },
+                {
+                  "$ref": "#/$defs/FileReference"
+                }
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "method",
+            "certificate",
+            "key"
+          ]
+        }
+      ]
+    },
     "StdioMcp": {
       "type": "object",
       "properties": {
@@ -2337,6 +2733,37 @@
         {
           "$ref": "#/$defs/FileReference"
         }
+      ]
+    },
+    "Trusted": {
+      "type": "object",
+      "properties": {
+        "address": {
+          "$ref": "#/$defs/MailAddress"
+        },
+        "fingerprint": {
+          "anyOf": [
+            {
+              "description": "OpenPGP primary-key fingerprint or SHA-256 fingerprint of an S/MIME certificate.",
+              "type": "string"
+            },
+            {
+              "$ref": "#/$defs/EnvReference"
+            },
+            {
+              "$ref": "#/$defs/FileReference"
+            }
+          ]
+        },
+        "method": {
+          "$ref": "#/$defs/Method"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "method",
+        "address",
+        "fingerprint"
       ]
     },
     "ValueSource": {

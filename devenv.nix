@@ -57,12 +57,13 @@ in
   packages = [
     pkgs.dovecot
     pkgs.git
+    pkgs.gnupg
     pkgs.knope
+    pkgs.openssl
     pkgs.python3
     pkgs.pkg-config
     pkgs.aws-lc
-  ]
-  ++ lib.optional isLinux pkgs.openssl;
+  ];
 
   languages.rust = {
     enable = true;
@@ -90,6 +91,8 @@ in
     '';
     env = {
       AWS_LC_SYS_STATIC = "1";
+      AGENTS_BUILD_GPG = lib.getExe' pkgs.gnupg "gpg";
+      AGENTS_BUILD_OPENSSL = lib.getExe pkgs.openssl;
     }
     // (
       if isLinux then

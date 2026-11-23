@@ -17,12 +17,17 @@ const POLL_INTERVAL: Duration = Duration::from_secs(2);
 pub fn serve(once: bool) -> Result<bool> {
     let workspace = Workspace::load(None)?;
     let routes = workspace.mail_routes()?;
+    let mut ingress = mail::ImapIngress::default();
     let mut observed = BTreeMap::<Id, BTreeSet<MailRef>>::new();
     if !once {
         eprintln!("agents: watching {}", workspace.root().display());
     }
     loop {
         let mut ok = true;
+        if let Err(error) = ingress.poll(&workspace, &routes) {
+            eprintln!("agents: receive: {error:#}");
+            ok = false;
+        }
         if let Err(error) = mail::flush(&workspace) {
             eprintln!("agents: flush: {error:#}");
             ok = false;

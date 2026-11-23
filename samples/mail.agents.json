@@ -42,6 +42,20 @@
     "cc": ["maintainer@example.test"],
     "bcc": ["audit@example.test"],
     "transport": {
+      "signatures": {
+        "signing": {
+          "builder@example.test": {
+            "method": "openpgp",
+            "fingerprint": "0000000000000000000000000000000000000000",
+            "home": "/path/to/builder-gnupg"
+          },
+          "agents+reviewer@example.test": {
+            "method": "smime",
+            "certificate": "/path/to/reviewer.pem",
+            "key": "/path/to/reviewer-key.pem"
+          }
+        }
+      },
       "smtp": {
         "endpoint": { "host": "smtp.example.test", "port": 465 },
         "login": {
