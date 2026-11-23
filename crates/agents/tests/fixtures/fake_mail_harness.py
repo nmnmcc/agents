@@ -66,6 +66,8 @@ def main():
             {"to": ["unapproved@example.test"], "subject": "Never", "body": "Never"},
             error=True,
         )
+        if full["body"].strip() == "Please acknowledge this task":
+            call(7, "send_mail", {"in_reply_to": mail, "body": "Task acknowledged"})
         call(5, "set_mail_read", {"mail": mail, "read": True})
         assert not call(6, "get_mail", mail)["message"]["unread"]
         client.stdin.close()

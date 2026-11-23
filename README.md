@@ -160,37 +160,36 @@ restores Bcc. Blind recipients do not appear in delivered headers.
 
 ## Exchange mail with people
 
-Use addresses your provider routes to and authorizes for submission.
+Use addresses your provider routes to, and an address it authorizes for
+SMTP submission.
 `agents` polls an ordinary IMAP folder and authenticates external mail with
 **OpenPGP or S/MIME**. It does not listen on a mail port or require a
 gateway. IMAP and SMTP passwords log in to the provider; they do not
 authenticate the person sending a task.
 
 Merge this mail configuration into the [sample project](samples/project).
-Replace `reviewer@example.test` with a mailbox your provider both delivers
-to and allows as a sender. For a single Agent, set its address under
-`agents.<id>.mail.address`; a top-level `mail.address` is a default for
-every agent, and resolved addresses must be unique.
+This example uses one mailbox, `project.agent@example.test`, for the whole
+project. Each Agent gets a distinct `+tag` address for routing and replies,
+but all Agents send from the untagged mailbox. The top-level `mail.address`
+is a template for every Agent; override it with `agents.<id>.mail.address`
+as needed. Resolved Agent addresses must be unique.
 
 ```yaml
-agents:
-  reviewer:
-    mail:
-      address: reviewer@example.test
-
 mail:
+  address: "project.agent+{{ agent.id }}@example.test"
   trust: ["maintainer@example.test"]
   transport:
     imap:
       endpoint: { host: imap.example.test, port: 993 }
       login:
-        username: reviewer@example.test
+        username: project.agent@example.test
         password: { file: "/home/agent/.config/agents/imap-password" }
       mailbox: INBOX
     smtp:
+      from: project.agent@example.test
       endpoint: { host: smtp.example.test, port: 587, security: starttls }
       login:
-        username: reviewer@example.test
+        username: project.agent@example.test
         password: { file: "/home/agent/.config/agents/smtp-password" }
     signatures:
       openpgp_keyring: "/home/agent/.config/agents/trusted.gpg"
@@ -204,18 +203,26 @@ mail:
           # Replace with the SHA-256 fingerprint of their S/MIME certificate.
           fingerprint: "0000000000000000000000000000000000000000000000000000000000000000"
       signing:
-        reviewer@example.test:
+        project.agent@example.test:
           method: smime
           certificate: "/home/agent/.config/agents/signing.pem"
           key: "/home/agent/.config/agents/signing-key.pem"
 ```
 
-Use the provider's app-specific password where required. A `+tag` address
-may be accepted for inbound delivery but not as an SMTP sender. If the
-provider delivers an alias to the configured IMAP folder, signed mail may
-use that alias in the outer `To:` while keeping the Agent's configured
-mailbox in the signed `Agent-To:`. The signing key in the configuration is
-indexed by that same configured mailbox.
+Use the provider's app-specific password where required. To reach the
+`reviewer` Agent, send to `project.agent+reviewer@example.test` and use the
+same address in the signed `Agent-To:`. You can also send to the untagged
+mailbox; signed ingress routes by `Agent-To:`, not the outer `To:`.
+
+`mail.transport.smtp.from` sets both the outgoing `From:` and the SMTP
+envelope sender. When it differs from the Agent address, the outgoing
+`Reply-To:` is the Agent address so email clients direct replies to its tag.
+If `smtp.from` is omitted, the Agent's own address is used for SMTP as before.
+The signing key is looked up first by Agent address, then by `smtp.from`.
+For signed Agent-to-Agent mail between separate projects, use a distinct
+signing identity for each Agent and pin it to that Agent's routing address
+on the receiving side. A shared key authenticates the project mailbox, not
+individual Agents; `agents` does not trust the outer `Reply-To:` of signed mail.
 
 For received OpenPGP mail, export trusted public keys to the binary keyring using
 `gpg --export <fingerprint> > trusted.gpg`. For S/MIME, obtain the leaf
@@ -227,7 +234,7 @@ Send signed mail with this text **inside the signed part**, followed by a
 blank line and the task:
 
 ```text
-Agent-To: reviewer@example.test
+Agent-To: project.agent+reviewer@example.test
 Task-ID: 550e8400-e29b-41d4-a716-446655440000@example.test
 Subject: Review this change
 
@@ -252,7 +259,7 @@ The source folder is not modified. Accepted mail and replay records are
 kept in the project's private local inbox. The outbox is local by default;
 an optional `mail.transport.outbox` names a separate private IMAP folder
 that supports permanent custom keywords. SMTP deliveries are signed per
-recipient with the sending agent's configured identity. For OpenPGP
+recipient with the configured signing identity. For OpenPGP
 sending, use `signing.<address>: { method: openpgp, fingerprint: "...",
 home: "/path/to/private/gnupg-home" }`. Protect private files and make sure
 the service can sign without an interactive prompt. Non-Nix installations

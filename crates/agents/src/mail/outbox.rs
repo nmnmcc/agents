@@ -81,24 +81,28 @@ pub fn flush(workspace: &Workspace) -> Result<()> {
             inbox.append(None, &stamp(&to, &from, entry.message)?)?;
             Submission::Accepted
         } else if let Some(config) = &mail.smtp {
-            let signed =
-                match mail
-                    .signatures
-                    .sign(workspace.root(), &from, &to, &id, entry.message)
-                {
-                    Ok(signed) => signed,
-                    Err(error) => {
-                        eprintln!("agents: cannot sign outbox UID {uid}: {error:#}");
-                        failed = true;
-                        continue;
-                    }
-                };
+            let smtp_from = config.from.as_ref().unwrap_or(&from);
+            let signed = match mail.signatures.sign(
+                workspace.root(),
+                &from,
+                smtp_from,
+                &to,
+                &id,
+                entry.message,
+            ) {
+                Ok(signed) => signed,
+                Err(error) => {
+                    eprintln!("agents: cannot sign outbox UID {uid}: {error:#}");
+                    failed = true;
+                    continue;
+                }
+            };
             if smtp.is_none() {
                 smtp = Some(transport::submission(config, workspace.root())?);
             }
             transport::send(
                 smtp.as_ref().expect("SMTP initialized"),
-                &from.to_string(),
+                &smtp_from.to_string(),
                 &to.to_string(),
                 &signed,
             )?

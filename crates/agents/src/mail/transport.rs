@@ -1,4 +1,7 @@
-use crate::{config::values::ValueSource, types::EnvName};
+use crate::{
+    config::values::ValueSource,
+    types::{EnvName, MailAddress},
+};
 use anyhow::{Context, Result, ensure};
 use lettre::{
     SmtpTransport, Transport, address::Envelope, transport::smtp::authentication::Credentials,
@@ -69,6 +72,9 @@ pub struct Incoming {
 pub struct Outgoing {
     pub endpoint: Endpoint,
     pub login: Option<Login>,
+    /// Shared SMTP From and envelope sender. Defaults to the sending agent's
+    /// address. When they differ, the agent's address is used as Reply-To.
+    pub from: Option<MailAddress>,
 }
 
 trait Stream: Read + Write + Send {}
