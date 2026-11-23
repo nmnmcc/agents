@@ -41,7 +41,8 @@ impl ValueSource {
     pub fn read(&self, root: &Path) -> Result<String> {
         match self {
             Self::Literal(value) => Ok(value.clone()),
-            Self::Env(reference) => read_env(&reference.env),
+            Self::Env(reference) => env::var(reference.env.to_string())
+                .with_context(|| format!("read environment variable {}", reference.env)),
             Self::File(reference) => {
                 let path = if reference.file.is_absolute() {
                     reference.file.clone()
@@ -52,10 +53,6 @@ impl ValueSource {
             }
         }
     }
-}
-
-pub fn read_env(name: &EnvName) -> Result<String> {
-    env::var(name.to_string()).with_context(|| format!("read environment variable {name}"))
 }
 
 pub fn is_reference(object: &Map<String, Value>, path: &[String]) -> bool {

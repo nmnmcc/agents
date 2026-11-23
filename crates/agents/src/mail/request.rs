@@ -4,8 +4,6 @@ use serde::{Deserialize, Serialize};
 #[derive(Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SendMail {
-    /// Single target agent (shorthand for one entry in to).
-    pub agent: Option<String>,
     /// Agent IDs, workspace-relative path:agent selectors, or trusted human email addresses.
     #[serde(default)]
     pub to: Vec<String>,

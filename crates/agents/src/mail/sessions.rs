@@ -36,6 +36,7 @@ pub struct Sessions {
     triggered_by_mail: bool,
 }
 
+/// A native session ID reported by the harness while it runs.
 #[derive(Default)]
 pub struct SessionId {
     observed: Mutex<Option<Option<String>>>,
@@ -118,10 +119,6 @@ impl Sessions {
         let session = harness::Session {
             id: current.id.clone(),
             resume,
-            directory: path
-                .parent()
-                .context("mail state directory missing")?
-                .to_owned(),
         };
         Ok((
             Self {
@@ -184,4 +181,47 @@ impl Sessions {
 
 pub fn message_key(sender: &str, id: &str) -> String {
     format!("{sender}\nmessage:{id}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Sessions, message_key};
+    use crate::mail::{inbox::MailEvent, request::MailRef};
+    use std::path::Path;
+
+    #[test]
+    fn outbound_reply_resumes_saved_session_only_for_its_recipient() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = Path::new("mail");
+        let agent = "reviewer".parse().unwrap();
+        let harness = "claude".parse().unwrap();
+        let open = |event: Option<&MailEvent>| {
+            Sessions::open(root.path(), directory, &agent, &harness, event).unwrap()
+        };
+        let (mut bindings, original) = open(None);
+        assert!(!original.resume);
+        bindings
+            .bind_outgoing([message_key("human@example.test", "outgoing@example.test")])
+            .unwrap();
+        drop(bindings);
+
+        let mut event = MailEvent {
+            mail: MailRef {
+                uid: 1,
+                uid_validity: 1,
+            },
+            sender: "human@example.test".into(),
+            ids: vec!["outgoing@example.test".into(), "reply@example.test".into()],
+        };
+        let (bindings, resumed) = open(Some(&event));
+        assert!(resumed.resume);
+        assert_eq!(resumed.id, original.id);
+        assert!(bindings.reply_keys(&event).is_ok());
+        drop(bindings);
+
+        event.sender = "other@example.test".into();
+        let (_bindings, unrelated) = open(Some(&event));
+        assert!(!unrelated.resume);
+        assert_ne!(unrelated.id, original.id);
+    }
 }

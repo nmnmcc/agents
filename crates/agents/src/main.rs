@@ -4,6 +4,7 @@ mod daemon;
 mod harness;
 mod mail;
 mod service;
+mod template;
 mod types;
 
 fn main() -> std::process::ExitCode {

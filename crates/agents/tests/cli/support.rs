@@ -67,9 +67,9 @@ exit 23
         .unwrap();
         fs::set_permissions(&program, fs::Permissions::from_mode(0o700)).unwrap();
         let harness = json!({
-                "version": 1, "program": program,
+                "program": program,
                 "args": ["{{ paths['native.json'] }}", "one ; $argument",
-                         {"when": "model is not none", "args": ["--model", "{{ model }}"]}],
+                         {"js": "model === null ? null : ['--model', model]"}],
                 "env": {"AGENTS_TEST_INJECT": "{{ model }}", "AGENTS_TEST_REMOVE": null},
                 "capabilities": {"mcp": ["stdio"], "skills": true},
                 "files": {"native.json": {"template": "{{ {'agent': agent, 'guide': project_instructions, 'skills': skills, 'mcp': mcp, 'path': paths['native.json']} | tojson }}\n", "format": "json"}},

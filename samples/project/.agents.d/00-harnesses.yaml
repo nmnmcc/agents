@@ -1,22 +1,15 @@
 # yaml-language-server: $schema=../../../agents.schema.json
 harnesses:
   claude:
-    version: 1
     program: claude
     args:
       - --print
       - --output-format
       - text
-      - when: model is not none
-        args: [--model, "{{ model }}"]
-      - when: session is none
-        args: [--no-session-persistence]
-      - when: session is not none
-        args:
-          - when: session.resume
-            args: [--resume, "{{ session.id }}"]
-          - when: not session.resume
-            args: [--session-id, "{{ session.id }}"]
+      - js: 'model === null ? null : ["--model", model]'
+      - js: |
+          session === null ? "--no-session-persistence"
+          : [session.resume ? "--resume" : "--session-id", session.id]
       - --append-system-prompt-file
       - "{{ paths['instructions.md'] }}"
       - --strict-mcp-config
@@ -25,7 +18,7 @@ harnesses:
     capabilities:
       mcp: [stdio, http]
       skills: true
-      sessions: true
+      sessions: supplied
     files:
       instructions.md:
         format: text
@@ -54,130 +47,113 @@ harnesses:
           {"mcpServers": {{ mcp | tojson }}}
 
   codex:
-    version: 1
     program: codex
     args:
       - exec
-      - when: session is none
-        args: [--ephemeral]
-      - when: session is not none
-        args:
-          - when: not session.resume
-            args: [--json]
+      - js: 'session === null ? "--ephemeral" : session.resume ? null : "--json"'
       - --sandbox
       - read-only
       - --color
       - never
       - -c
-      - template: |
-          {% set instructions -%}
-          {% if project_instructions is not none -%}
-          {{ project_instructions }}
+      - |
+        {% set instructions -%}
+        {% if project_instructions is not none -%}
+        {{ project_instructions }}
 
-          {% endif -%}
-          {{ agent.instructions }}
-          {% if skills %}
+        {% endif -%}
+        {{ agent.instructions }}
+        {% if skills %}
 
-          Read the corresponding SKILL.md before applying a skill:
-          {% for name in skills %}
-          - {{ name }}: {{ skills[name] | tojson }}
-          {% endfor %}
-          {% endif %}
-          {%- endset -%}
-          developer_instructions={{ instructions | totoml -}}
+        Read the corresponding SKILL.md before applying a skill:
+        {% for name in skills %}
+        - {{ name }}: {{ skills[name] | tojson }}
+        {% endfor %}
+        {% endif %}
+        {%- endset -%}
+        developer_instructions={{ instructions | tojson -}}
       - -c
-      - template: |
-          mcp_servers={
-          {%- for name in mcp -%}
-          {%- set server = mcp[name] -%}
-          {{ name }} = {
-          {%- if server.type == 'stdio' -%}
-          command = {{ server.command | totoml }}, args = {{ server.args | totoml }}, env = {{ server.env | totoml }}
-          {%- else -%}
-          url = {{ server.url | totoml }}
-          {%- endif -%}
-          , required = true}
-          {%- if not loop.last %}, {% endif -%}
-          {%- endfor -%}
-          }
-          {{- '' -}}
-      - when: model is not none
-        args: [--model, "{{ model }}"]
-      - when: session is not none
-        args:
-          - when: session.resume
-            args: [resume, "{{ session.id }}"]
+      - js: |
+          // JSON strings and arrays are valid TOML; tables become inline tables.
+          const toml = (value) =>
+            Array.isArray(value) ? `[${value.map(toml).join(", ")}]`
+            : value !== null && typeof value === "object"
+              ? `{${Object.entries(value).map(([k, v]) => `${JSON.stringify(k)} = ${toml(v)}`).join(", ")}}`
+              : JSON.stringify(value);
+          const servers = Object.entries(mcp).map(([name, server]) => [
+            name,
+            server.type === "stdio"
+              ? { command: server.command, args: server.args, env: server.env, required: true }
+              : { url: server.url, required: true },
+          ]);
+          "mcp_servers=" + toml(Object.fromEntries(servers))
+      - js: 'model === null ? null : ["--model", model]'
+      - js: 'session?.resume ? ["resume", session.id] : null'
       - "-"
-    session_id_event: { event: thread.started, field: thread_id, uuid: true }
+    hooks:
+      # Codex assigns its own thread UUID and reports it in a JSON event.
+      stdout:
+        js: |
+          const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+          let action = null;
+          try {
+            const event = JSON.parse(line);
+            if (event.type === "thread.started" && uuid.test(event.thread_id)) {
+              action = { session: event.thread_id };
+            }
+          } catch {}
+          action
     capabilities:
       mcp: [stdio, http]
       skills: true
-      sessions: true
+      sessions: reported
 
   opencode:
-    version: 1
     program: opencode
     args:
       - --standalone
       - run
       - --agent
       - "agents-{{ agent.id }}"
-      - when: model is not none
-        args: [--model, "{{ model }}"]
-      - when: session is not none
-        args: [--session, "ses_{{ session.id | replace('-', '') }}"]
+      - js: 'model === null ? null : ["--model", model]'
+      - js: 'session === null ? null : ["--session", "ses_" + session.id.replaceAll("-", "")]'
     env:
       OPENCODE_CONFIG: "{{ paths['opencode.json'] }}"
       OPENCODE_CONFIG_CONTENT: null
-      OPENCODE_DB: "{{ ':memory:' if session is none else session.directory ~ '/opencode-' ~ agent.id ~ '.sqlite' }}"
-    session_resume_check:
-      - --standalone
-      - api
-      - get
-      - "/api/session/ses_{{ session.id | replace('-', '') }}"
+      OPENCODE_DB: { js: 'session === null ? ":memory:" : null' }
+    hooks:
+      # OpenCode starts a new session for an unknown ID; refuse to resume one that is gone.
+      before:
+        - - js: |
+              session?.resume
+                ? [program, "--standalone", "api", "get", "/api/session/ses_" + session.id.replaceAll("-", "")]
+                : null
     capabilities:
       mcp: [stdio, http]
       skills: true
-      sessions: true
+      sessions: supplied
     files:
       opencode.json:
         format: json
-        template: |
-          {% set system -%}
-          {% if project_instructions is not none -%}
-          {{ project_instructions }}
-
-          {% endif -%}
-          {{ agent.instructions }}
-          {% if skills %}
-
-          Read the corresponding SKILL.md before applying a skill:
-          {% for name in skills %}
-          - {{ name }}: {{ skills[name] | tojson }}
-          {% endfor %}
-          {% endif %}
-          {%- endset -%}
-          {
-            "$schema": "https://opencode.ai/config.json",
-            "agents": {
-              {{ ('agents-' ~ agent.id) | tojson }}: {
-                "mode": "primary",
-                "description": {{ agent.description | tojson }},
-                "system": {{ system | tojson }}
-              }
-            },
-            "mcp": {
-              "servers": {
-                {% for name in mcp %}
-                {% set server = mcp[name] %}
-                {{ name | tojson }}:
-                {% if server.type == 'stdio' %}
-                  {{ {'type': 'local', 'command': [server.command] + server.args, 'environment': server.env} | tojson }}
-                {% else %}
-                  {{ {'type': 'remote', 'url': server.url} | tojson }}
-                {% endif %}
-                {% if not loop.last %},{% endif %}
-                {% endfor %}
-              }
+        template:
+          js: |
+            let system = (project_instructions === null ? "" : project_instructions + "\n\n")
+              + agent.instructions.trimEnd();
+            const names = Object.keys(skills);
+            if (names.length > 0) {
+              system += "\n\nRead the corresponding SKILL.md before applying a skill:\n"
+                + names.map((name) => `- ${name}: ${JSON.stringify(skills[name])}`).join("\n");
             }
-          }
+            const servers = Object.entries(mcp).map(([name, server]) => [
+              name,
+              server.type === "stdio"
+                ? { type: "local", command: [server.command, ...server.args], environment: server.env }
+                : { type: "remote", url: server.url },
+            ]);
+            ({
+              $schema: "https://opencode.ai/config.json",
+              agents: {
+                [`agents-${agent.id}`]: { mode: "primary", description: agent.description, system },
+              },
+              mcp: { servers: Object.fromEntries(servers) },
+            })

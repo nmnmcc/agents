@@ -78,7 +78,6 @@ def fixture(root, imap_port, smtp_port):
             {
                 "harnesses": {
                     "fake": {
-                        "version": 1,
                         "program": sys.executable,
                         "args": [str(harness), "{{ agent.id }}", "{{ mcp | tojson }}"],
                         "capabilities": {"mcp": ["stdio"]},

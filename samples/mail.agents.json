@@ -1,5 +1,5 @@
 {
-  "$schema": "./agents.schema.json",
+  "$schema": "../agents.schema.json",
   "version": 1,
   "agent": "reviewer",
   "instructions": "Keep changes small and testable. Report what you verified and what remains uncertain.",

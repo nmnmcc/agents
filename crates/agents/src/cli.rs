@@ -100,20 +100,11 @@ fn run(args: Args) -> Result<ExitCode> {
             mailbox::mcp::serve(socket)?;
             Ok(ExitCode::SUCCESS)
         }
-        Action::Run { directory, agent } => {
-            let workspace = config::Workspace::load(directory.as_deref())?;
-            let (project, routes) = workspace.project_for_run(agent.as_ref())?;
-            let identity = routes
-                .as_ref()
-                .and_then(|routes| routes.identity(&project).map(|agent| (routes, agent)));
-            mailbox::execute(
-                project,
-                io::stdin().lock(),
-                workspace.mail(),
-                identity,
-                None,
-            )
-        }
+        Action::Run { directory, agent } => run_agent(
+            &config::Workspace::load(directory.as_deref())?,
+            agent.as_ref(),
+            io::stdin().lock(),
+        ),
         Action::Config { command } => {
             command.run()?;
             Ok(ExitCode::SUCCESS)
@@ -122,11 +113,24 @@ fn run(args: Args) -> Result<ExitCode> {
     }
 }
 
+/// Run an agent with the task as input, attaching its mailbox when it has an address.
+fn run_agent(
+    workspace: &config::Workspace,
+    agent: Option<&types::Id>,
+    task: impl io::Read,
+) -> Result<ExitCode> {
+    let (project, routes) = workspace.project_for_run(agent)?;
+    let identity = routes
+        .as_ref()
+        .and_then(|routes| routes.identity(&project).map(|mailbox| (routes, mailbox)));
+    mailbox::execute(project, task, workspace.mail(), identity, None)
+}
+
 impl ConfigAction {
     fn run(self) -> Result<()> {
         fn load(directory: Option<&Path>) -> Result<(config::Project, harness::Plan)> {
             let project = config::Workspace::load(directory)?.project(None)?;
-            let plan = harness::Plan::render(&project, "<run-dir>".as_ref())?;
+            let plan = harness::Plan::render(&project, "<run-dir>".as_ref(), None)?;
             Ok((project, plan))
         }
 
@@ -160,7 +164,7 @@ fn print_json(value: &impl serde::Serialize) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn main() -> ExitCode {
+pub fn main() -> ExitCode {
     match run(Args::parse()) {
         Ok(code) => code,
         Err(error) => {

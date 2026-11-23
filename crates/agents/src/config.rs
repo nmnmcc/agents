@@ -1,7 +1,7 @@
 mod layers;
 mod routing;
-pub(crate) mod schema;
-pub(crate) mod values;
+pub mod schema;
+pub mod values;
 
 use crate::{
     harness::Harness,
@@ -10,7 +10,7 @@ use crate::{
 use anyhow::{Context, Result, bail, ensure};
 use ignore::gitignore::GitignoreBuilder;
 use routing::{AgentMail, ProjectMail};
-pub(crate) use routing::{AgentMailbox, MailRoutes};
+pub use routing::{AgentMailbox, MailRoutes};
 use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -214,11 +214,10 @@ impl Workspace {
     }
 
     pub fn project(&self, agent: Option<&Id>) -> Result<Project> {
-        self.resolve(&self.selected, agent.unwrap_or(&self.selected.config.agent))
-    }
-
-    fn resolve(&self, located: &LocatedProject, agent_id: &Id) -> Result<Project> {
+        let located = &self.selected;
+        let agent_id = agent.unwrap_or(&located.config.agent);
         Self::resolve_project(located, agent_id).map_err(|error| {
+            // Errors may quote resolved secrets; do not reveal them.
             if located.references.used {
                 anyhow::anyhow!("could not resolve agent configuration with external references")
             } else {

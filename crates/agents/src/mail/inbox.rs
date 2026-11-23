@@ -1,7 +1,7 @@
 use super::{
     AddressPolicy,
     request::{GetAttachment, ListMail, MailRef, SearchMail},
-    store::Session,
+    store::Folder,
 };
 use crate::types::MailAddress;
 use anyhow::{Context, Result, ensure};
@@ -14,7 +14,7 @@ const ENVELOPE_TO: &str = "X-Agents-Envelope-To";
 const AUTHENTICATED_FROM: &str = "X-Agents-Authenticated-From";
 
 pub struct Inbox<'a> {
-    session: Session,
+    folder: Folder,
     address: MailAddress,
     validity: u32,
     incoming: &'a AddressPolicy,
@@ -30,9 +30,9 @@ pub struct Reply {
 }
 
 pub struct MailEvent {
-    pub mail: MailRef,
-    sender: String,
-    ids: Vec<String>,
+    pub(super) mail: MailRef,
+    pub(super) sender: String,
+    pub(super) ids: Vec<String>,
 }
 
 impl MailEvent {
@@ -52,13 +52,13 @@ impl MailEvent {
 
 impl<'a> Inbox<'a> {
     pub(super) fn open(
-        session: Session,
+        folder: Folder,
         address: MailAddress,
         incoming: &'a AddressPolicy,
     ) -> Result<Self> {
-        let validity = session.validity()?;
+        let validity = folder.validity()?;
         Ok(Self {
-            session,
+            folder,
             address,
             validity,
             incoming,
@@ -81,7 +81,7 @@ impl<'a> Inbox<'a> {
             if unread { "UNSEEN" } else { "" },
         );
         let mut uids =
-            self.session
+            self.folder
                 .search(query.trim(), &[], if unread { &["\\Seen"] } else { &[] })?;
         uids.retain(|uid| before.is_none_or(|before| *uid < before));
         uids.reverse();
@@ -101,7 +101,7 @@ impl<'a> Inbox<'a> {
     pub fn unread_refs(&mut self) -> Result<BTreeSet<MailRef>> {
         let mut unread = BTreeSet::new();
         for uid in self.candidates("", true, None)? {
-            if let Some(raw) = self.session.message(uid)?
+            if let Some(raw) = self.folder.message(uid)?
                 && let Some(message) = MessageParser::default().parse(&raw)
                 && self.visible(&message)
             {
@@ -132,7 +132,7 @@ impl<'a> Inbox<'a> {
     pub fn search(&mut self, request: SearchMail) -> Result<Value> {
         ensure!(!request.query.trim().is_empty(), "search query is empty");
         let query = quoted(&request.query)?;
-        if request.query.is_ascii() && !self.session.is_local() {
+        if request.query.is_ascii() && !self.folder.is_local() {
             let uids = self.candidates(
                 &format!("TEXT {query}"),
                 request.unread_only,
@@ -158,7 +158,7 @@ impl<'a> Inbox<'a> {
         let mut items = Vec::new();
         let mut cursor = None;
         for uid in uids {
-            let Some(raw) = self.session.message(uid)? else {
+            let Some(raw) = self.folder.message(uid)? else {
                 continue;
             };
             let Some(message) = MessageParser::default().parse(&raw) else {
@@ -204,7 +204,7 @@ impl<'a> Inbox<'a> {
             "stale or invalid mail reference"
         );
         let raw = self
-            .session
+            .folder
             .message(id.uid)?
             .context("mail is unavailable")?;
         let message = MessageParser::default()
@@ -222,7 +222,7 @@ impl<'a> Inbox<'a> {
             .chars()
             .take(200)
             .collect::<String>();
-        let flags = self.session.flags(uid)?;
+        let flags = self.folder.flags(uid)?;
         Ok(json!({
             "mail": MailRef { uid, uid_validity: self.validity },
             "from": unique_header(message, AUTHENTICATED_FROM).ok().flatten()
@@ -321,7 +321,7 @@ impl<'a> Inbox<'a> {
     }
 
     pub fn set_read(&mut self, id: MailRef, read: bool) -> Result<Value> {
-        self.inspect(id, |this, _| this.session.set_read(id.uid, read))?;
+        self.inspect(id, |this, _| this.folder.set_read(id.uid, read))?;
         Ok(json!({"read":read}))
     }
 
@@ -336,7 +336,7 @@ impl<'a> Inbox<'a> {
             );
             let mut found = Vec::new();
             for uid in this.candidates(&query, false, None)?.into_iter().rev() {
-                let Some(raw) = this.session.message(uid)? else {
+                let Some(raw) = this.folder.message(uid)? else {
                     continue;
                 };
                 let Some(other) = MessageParser::default().parse(&raw) else {
@@ -428,47 +428,4 @@ fn quoted(text: &str) -> Result<String> {
         "\"{}\"",
         text.replace('\\', "\\\\").replace('"', "\\\"")
     ))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{MailEvent, MailRef};
-    use crate::mail::sessions::{Sessions, message_key};
-    use std::path::Path;
-
-    #[test]
-    fn outbound_reply_resumes_saved_session_only_for_its_recipient() {
-        let root = tempfile::tempdir().unwrap();
-        let directory = Path::new("mail");
-        let agent = "reviewer".parse().unwrap();
-        let harness = "claude".parse().unwrap();
-        let open = |event: Option<&MailEvent>| {
-            Sessions::open(root.path(), directory, &agent, &harness, event).unwrap()
-        };
-        let (mut bindings, original) = open(None);
-        assert!(!original.resume);
-        bindings
-            .bind_outgoing([message_key("human@example.test", "outgoing@example.test")])
-            .unwrap();
-        drop(bindings);
-
-        let mut event = MailEvent {
-            mail: MailRef {
-                uid: 1,
-                uid_validity: 1,
-            },
-            sender: "human@example.test".into(),
-            ids: vec!["outgoing@example.test".into(), "reply@example.test".into()],
-        };
-        let (bindings, resumed) = open(Some(&event));
-        assert!(resumed.resume);
-        assert_eq!(resumed.id, original.id);
-        assert!(bindings.reply_keys(&event).is_ok());
-        drop(bindings);
-
-        event.sender = "other@example.test".into();
-        let (_bindings, unrelated) = open(Some(&event));
-        assert!(!unrelated.resume);
-        assert_ne!(unrelated.id, original.id);
-    }
 }

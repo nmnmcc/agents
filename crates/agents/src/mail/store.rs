@@ -9,9 +9,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
-pub enum Session {
+pub enum Folder {
     Imap {
-        client: Box<transport::Session>,
+        client: Box<transport::Imap>,
         folder: String,
         validity: u32,
     },
@@ -21,8 +21,8 @@ pub enum Session {
     },
 }
 
-impl Session {
-    pub fn imap(mut client: transport::Session, folder: &str, keywords: &[&str]) -> Result<Self> {
+impl Folder {
+    pub fn imap(mut client: transport::Imap, folder: &str, keywords: &[&str]) -> Result<Self> {
         let validity = client.select(folder, keywords)?;
         Ok(Self::Imap {
             client: Box::new(client),

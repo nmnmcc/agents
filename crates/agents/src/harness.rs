@@ -1,122 +1,100 @@
 use crate::config::{Project, Transport};
-use crate::types::{EnvName, FileName, Program, Version};
-use anyhow::{Context, Result, ensure};
-use minijinja::{
-    AutoEscape, Environment, Error, ErrorKind, UndefinedBehavior, Value, context,
-    value::{ValueKind, ViaDeserialize},
-};
+use crate::template::{Renderer, Sandbox, Script, Template};
+use crate::types::{EnvName, FileName, Program};
+use anyhow::{Context, Result, bail, ensure};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet},
+    ffi::OsStr,
     fs,
     io::{self, BufRead, BufReader, Read, Seek, Write},
     path::{Path, PathBuf},
     process::{Command, ExitStatus, Stdio},
+    sync::OnceLock,
+    thread,
 };
 
 #[derive(Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Harness {
-    #[serde(rename = "$schema")]
-    _schema: Option<String>,
-    #[serde(rename = "version")]
-    _version: Version,
     program: Program,
-    args: Vec<Arg>,
+    args: Vec<Template>,
     /// Child-only environment overrides; null removes an inherited value.
     #[serde(default)]
-    env: BTreeMap<EnvName, Option<String>>,
+    env: BTreeMap<EnvName, Option<Template>>,
     #[serde(default)]
     capabilities: Capabilities,
     #[serde(default)]
     files: BTreeMap<FileName, Artifact>,
-    stdin: Option<String>,
-    /// Read a native session ID from a JSONL event on stdout when starting a mail session.
-    session_id_event: Option<SessionIdEvent>,
-    /// Arguments for a command that must succeed before resuming a mail session.
-    session_resume_check: Option<Vec<Arg>>,
+    /// Renders the harness input from `task`.
+    stdin: Option<Template>,
+    #[serde(default)]
+    hooks: Hooks,
 }
 
 impl Harness {
     pub fn supports_sessions(&self) -> bool {
-        self.capabilities.sessions
+        self.capabilities.sessions != Sessions::None
     }
+}
+
+/// Programs and scripts around one harness run. Commands run in the project
+/// directory with the harness environment; each is an argument list whose
+/// first element is the program, and an empty list is skipped.
+#[derive(Clone, Default, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct Hooks {
+    /// Commands run in order before the harness starts; any failure aborts the run.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    before: Vec<Vec<Template>>,
+    /// Commands run in order after the harness exits, with its exit code as
+    /// `status` (null if killed by a signal); any failure fails the run.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    after: Vec<Vec<Template>>,
+    /// Script run on each line of harness stdout.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stdout: Option<Script>,
+    /// Script run on each line of harness stderr.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stderr: Option<Script>,
 }
 
 #[derive(Serialize)]
 pub struct Session {
     pub id: String,
     pub resume: bool,
-    pub directory: PathBuf,
 }
 
-#[derive(Clone, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct SessionIdEvent {
-    /// Expected value of the JSON event's `type` field.
-    event: String,
-    /// JSON field containing the native session ID.
-    field: String,
-    /// Require a UUID rather than accepting an arbitrary identifier.
-    #[serde(default)]
-    uuid: bool,
-}
-
-#[derive(Clone, Deserialize, JsonSchema)]
-#[serde(untagged)]
-enum Arg {
-    Inline(String),
-    File(ArgTemplate),
-    Conditional(ArgGroup),
-}
-
-#[derive(Clone, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct ArgTemplate {
-    template: String,
-}
-
-#[derive(Clone, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct ArgGroup {
-    /// MiniJinja expression that must evaluate to a boolean.
-    when: String,
-    /// Arguments emitted at this position when the condition is true.
-    args: Vec<Arg>,
-}
-
-fn render_args(
-    args: &[Arg],
-    env: &Environment<'_>,
-    ctx: &Value,
-    output: &mut Vec<String>,
-) -> Result<()> {
+/// Renders arguments in order. A string becomes one argument; JavaScript may
+/// also return an array of arguments, or null for none.
+fn render_args(args: &[Template], renderer: &Renderer) -> Result<Vec<String>> {
+    let mut output = Vec::new();
     for (index, arg) in args.iter().enumerate() {
-        let rendered = (|| -> Result<Option<String>> {
-            Ok(match arg {
-                Arg::Inline(template) => Some(env.render_str(template, ctx.clone())?),
-                Arg::File(file) => Some(env.render_str(&file.template, ctx.clone())?),
-                Arg::Conditional(group) => {
-                    let include = env.compile_expression(&group.when)?.eval(ctx.clone())?;
-                    ensure!(
-                        include.kind() == ValueKind::Bool,
-                        "`when` must evaluate to a boolean"
-                    );
-                    if include.is_true() {
-                        render_args(&group.args, env, ctx, output)?;
+        (|| -> Result<()> {
+            match renderer.value(arg)? {
+                Value::Null => {}
+                Value::String(arg) => output.push(arg),
+                Value::Array(items) => {
+                    for item in items {
+                        let Value::String(arg) = item else {
+                            bail!("expected an array of strings, got {item}");
+                        };
+                        output.push(arg);
                     }
-                    None
                 }
-            })
+                other => bail!("expected a string, array, or null, got {other}"),
+            }
+            ensure!(
+                output.iter().all(|arg| !arg.contains('\0')),
+                "produced a NUL byte"
+            );
+            Ok(())
         })()
         .with_context(|| format!("render args[{index}]"))?;
-        if let Some(arg) = rendered {
-            ensure!(!arg.contains('\0'), "args[{index}] produced a NUL byte");
-            output.push(arg);
-        }
     }
-    Ok(())
+    Ok(output)
 }
 
 #[derive(Clone, Default, Deserialize, JsonSchema)]
@@ -126,15 +104,28 @@ struct Capabilities {
     mcp: Vec<Transport>,
     #[serde(default)]
     skills: bool,
-    /// Can create and resume a persistent native session using the supplied session ID.
     #[serde(default)]
-    sessions: bool,
+    sessions: Sessions,
+}
+
+/// How the harness identifies persistent native sessions.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum Sessions {
+    /// No persistent sessions.
+    #[default]
+    None,
+    /// Creates and resumes sessions under the ID `agents` supplies.
+    Supplied,
+    /// Assigns its own ID, which an output hook reports for a new session.
+    Reported,
 }
 
 #[derive(Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct Artifact {
-    template: String,
+    /// JavaScript may return any JSON value for a `json` file.
+    template: Template,
     format: Format,
 }
 
@@ -152,27 +143,35 @@ pub struct Plan {
     args: Vec<String>,
     child_env: BTreeMap<EnvName, Option<String>>,
     files: BTreeMap<FileName, String>,
-    stdin_template: Option<String>,
+    stdin_template: Option<Template>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    before: Vec<Vec<String>>,
+    hooks: Hooks,
     #[serde(skip)]
-    env: Environment<'static>,
+    context: Value,
+    #[serde(skip)]
+    reports_session: bool,
     #[serde(skip)]
     reference_env: BTreeSet<EnvName>,
-    #[serde(skip)]
-    session_id_event: Option<SessionIdEvent>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    resume_check: Option<Vec<String>>,
+}
+
+/// What an output hook asked for one line.
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LineAction {
+    /// Replacement text; null drops the line; absent keeps it.
+    #[serde(default, deserialize_with = "present")]
+    line: Option<Option<String>>,
+    /// Native session ID reported by the harness.
+    session: Option<String>,
+}
+
+fn present<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Option<String>>, D::Error> {
+    Option::<String>::deserialize(d).map(Some)
 }
 
 impl Plan {
-    pub fn render(project: &Project, run_dir: &Path) -> Result<Self> {
-        Self::render_with_session(project, run_dir, None)
-    }
-
-    pub fn render_with_session(
-        project: &Project,
-        run_dir: &Path,
-        session: Option<&Session>,
-    ) -> Result<Self> {
+    pub fn render(project: &Project, run_dir: &Path, session: Option<&Session>) -> Result<Self> {
         Self::render_resolved(project, run_dir, session).map_err(|error| {
             if project.references.used {
                 anyhow::anyhow!("could not render harness configuration with external references")
@@ -213,61 +212,71 @@ impl Plan {
             .iter()
             .map(|(name, path)| Ok((name, path.to_str().context("skill path is not UTF-8")?)))
             .collect::<Result<BTreeMap<_, _>>>()?;
-        let ctx = context! {
-            agent => &project.agent,
-            project_instructions => &project.project_instructions,
-            mcp => &project.mcp,
-            skills => skills,
-            paths => paths,
-            model => &project.model,
-            session => session,
-        };
-        let mut env = templates();
+        let reported = harness.capabilities.sessions == Sessions::Reported;
+        ensure!(
+            !reported || harness.hooks.stdout.is_some() || harness.hooks.stderr.is_some(),
+            "reported sessions require a stdout or stderr hook"
+        );
+        let context = json!({
+            "program": &harness.program,
+            "agent": &project.agent,
+            "project_instructions": &project.project_instructions,
+            "mcp": &project.mcp,
+            "skills": skills,
+            "paths": paths,
+            "model": &project.model,
+            "session": session,
+        });
+        let renderer = Renderer::new(&context)?;
         let mut files = BTreeMap::new();
         for (name, artifact) in &harness.files {
-            let content = env
-                .render_str(&artifact.template, ctx.clone())
-                .with_context(|| format!("render {name}"))?;
-            if matches!(artifact.format, Format::Json) {
-                serde_json::from_str::<serde_json::Value>(&content)
-                    .with_context(|| format!("generated {name} is not valid JSON"))?;
-            }
+            let content = (|| -> Result<String> {
+                Ok(
+                    match (renderer.value(&artifact.template)?, &artifact.format) {
+                        (Value::String(content), Format::Json) => {
+                            serde_json::from_str::<Value>(&content)
+                                .context("generated content is not valid JSON")?;
+                            content
+                        }
+                        (Value::String(content), Format::Text) => content,
+                        (value, Format::Json) => serde_json::to_string_pretty(&value)?,
+                        (value, Format::Text) => bail!("expected a string, got {value}"),
+                    },
+                )
+            })()
+            .with_context(|| format!("render {name}"))?;
             files.insert(name.clone(), content);
         }
-        let mut args = Vec::new();
-        render_args(&harness.args, &env, &ctx, &mut args)?;
-        let resume_check = harness
-            .session_resume_check
-            .as_ref()
-            .filter(|_| session.is_some_and(|session| session.resume))
-            .map(|check| {
-                let mut args = Vec::new();
-                render_args(check, &env, &ctx, &mut args)?;
-                ensure!(!args.is_empty(), "empty session resume check");
-                Ok::<_, anyhow::Error>(args)
+        let args = render_args(&harness.args, &renderer)?;
+        let before = harness
+            .hooks
+            .before
+            .iter()
+            .enumerate()
+            .map(|(index, hook)| {
+                render_args(hook, &renderer)
+                    .with_context(|| format!("render hooks.before[{index}]"))
             })
-            .transpose()?;
-        let session_id_event = harness
-            .session_id_event
-            .clone()
-            .filter(|_| session.is_some_and(|session| !session.resume));
+            .collect::<Result<Vec<_>>>()?;
         let mut child_env = BTreeMap::new();
         for (name, template) in &harness.env {
-            let value = template
-                .as_deref()
-                .map(|template| env.render_str(template, ctx.clone()))
-                .transpose()
-                .with_context(|| format!("render child environment variable {name}"))?;
-            ensure!(
-                value.as_ref().is_none_or(|value| !value.contains('\0')),
-                "child environment variable {name} contains a NUL byte"
-            );
+            let value = (|| -> Result<Option<String>> {
+                let value = match template {
+                    None => None,
+                    Some(template) => match renderer.value(template)? {
+                        Value::Null => None,
+                        Value::String(value) => Some(value),
+                        other => bail!("expected a string or null, got {other}"),
+                    },
+                };
+                ensure!(
+                    value.as_ref().is_none_or(|value| !value.contains('\0')),
+                    "contains a NUL byte"
+                );
+                Ok(value)
+            })()
+            .with_context(|| format!("render child environment variable {name}"))?;
             child_env.insert(name.clone(), value);
-        }
-        let stdin_template = harness.stdin.clone();
-        if let Some(template) = &stdin_template {
-            env.add_template_owned("stdin", template.clone())
-                .context("compile stdin template")?;
         }
         Ok(Self {
             cwd: project.root.clone(),
@@ -275,118 +284,190 @@ impl Plan {
             args,
             child_env,
             files,
-            stdin_template,
-            env,
+            stdin_template: harness.stdin.clone(),
+            before,
+            hooks: harness.hooks.clone(),
+            context,
+            reports_session: reported && session.is_some_and(|session| !session.resume),
             reference_env: project.references.env.clone(),
-            session_id_event,
-            resume_check,
         })
     }
 
+    /// Whether `execute` must observe a native session ID for this run.
+    pub fn reports_session_id(&self) -> bool {
+        self.reports_session
+    }
+
+    /// Runs the hooks and the harness; `observe` receives a reported native session ID.
     pub fn execute(
-        self,
-        run_dir: &Path,
-        task_input: impl Read,
-        secrets: &[&EnvName],
-    ) -> Result<ExitStatus> {
-        self.execute_observing(run_dir, task_input, secrets, |_| {})
-    }
-
-    pub fn captures_session_id(&self) -> bool {
-        self.session_id_event.is_some()
-    }
-
-    pub fn execute_observing(
         self,
         run_dir: &Path,
         mut task_input: impl Read,
         secrets: &[&EnvName],
-        mut observe: impl FnMut(String),
+        observe: impl Fn(String) + Sync,
     ) -> Result<ExitStatus> {
-        for (name, content) in self.files {
-            fs::write(run_dir.join(&name), content).with_context(|| format!("write {name}"))?;
+        for (name, content) in &self.files {
+            fs::write(run_dir.join(name), content).with_context(|| format!("write {name}"))?;
         }
         let mut input = tempfile::tempfile_in(run_dir).context("create task spool")?;
-        if self.stdin_template.is_some() {
+        if let Some(template) = &self.stdin_template {
             let task = io::read_to_string(&mut task_input).context("read UTF-8 task")?;
-            let prompt = self
-                .env
-                .get_template("stdin")?
-                .render(context! { task })
+            let prompt = Renderer::new(json!({ "task": task }))?
+                .string(template)
                 .context("render stdin template")?;
             input.write_all(prompt.as_bytes())?;
         } else {
             io::copy(&mut task_input, &mut input).context("spool task")?;
         }
         input.rewind()?;
-        let command = |args: &[String]| {
-            let mut command = Command::new(&self.program);
-            command.current_dir(&self.cwd).args(args);
-            for name in &self.reference_env {
-                command.env_remove(name);
-            }
-            for (name, value) in &self.child_env {
-                match value {
-                    Some(value) => command.env(name, value),
-                    None => command.env_remove(name),
-                };
-            }
-            for secret in secrets {
-                command.env_remove(secret);
-            }
-            command
-        };
-        if let Some(check) = &self.resume_check {
-            let status = command(check)
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .status()
-                .context("check original harness session")?;
-            ensure!(
-                status.success(),
-                "original harness session is unavailable ({status})"
-            );
+        for (index, hook) in self.before.iter().enumerate() {
+            self.hook(hook, secrets)
+                .with_context(|| format!("hooks.before[{index}]"))?;
         }
-        let mut command = command(&self.args);
-        command.stdin(Stdio::from(input));
-        let Some(event) = self.session_id_event else {
-            return command.status().context("run harness");
+        let mut command = self.command(&self.program, &self.args, secrets);
+        command.stdin(input);
+        if self.hooks.stdout.is_some() {
+            command.stdout(Stdio::piped());
+        }
+        if self.hooks.stderr.is_some() {
+            command.stderr(Stdio::piped());
+        }
+        let mut child = command.spawn().context("run harness")?;
+        let reported = OnceLock::new();
+        let report = |id: String| {
+            if self.reports_session && reported.set(()).is_ok() {
+                observe(id);
+            }
         };
-        let mut child = command
-            .stdout(Stdio::piped())
-            .spawn()
-            .context("run harness")?;
-        let mut pipe = BufReader::new(child.stdout.take().expect("piped harness stdout"));
-        let result = relay_session_events(&mut pipe, &event, &mut observe);
-        drop(pipe);
-        if result.is_err() {
+        let streams = [
+            (
+                "stdout",
+                child
+                    .stdout
+                    .take()
+                    .map(|pipe| Box::new(pipe) as Box<dyn Read + Send>),
+                self.hooks.stdout.as_ref(),
+            ),
+            (
+                "stderr",
+                child
+                    .stderr
+                    .take()
+                    .map(|pipe| Box::new(pipe) as Box<dyn Read + Send>),
+                self.hooks.stderr.as_ref(),
+            ),
+        ];
+        let relayed = thread::scope(|scope| {
+            let workers = streams
+                .into_iter()
+                .filter_map(|(stream, pipe, script)| Some((stream, pipe?, script?)))
+                .map(|(stream, pipe, script)| {
+                    let report = &report;
+                    let context = &self.context;
+                    scope.spawn(move || {
+                        relay(stream, pipe, script, context, report)
+                            .with_context(|| format!("hooks.{stream}"))
+                    })
+                })
+                .collect::<Vec<_>>();
+            workers
+                .into_iter()
+                .try_for_each(|worker| worker.join().expect("output hook panicked"))
+        });
+        if relayed.is_err() {
             let _ = child.kill();
         }
         let status = child.wait().context("wait for harness")?;
-        result?;
+        relayed?;
+        if !self.hooks.after.is_empty() {
+            let mut context = self.context.clone();
+            context["status"] = json!(status.code());
+            let renderer = Renderer::new(&context)?;
+            for (index, hook) in self.hooks.after.iter().enumerate() {
+                render_args(hook, &renderer)
+                    .and_then(|hook| self.hook(&hook, secrets))
+                    .with_context(|| format!("hooks.after[{index}]"))?;
+            }
+        }
         Ok(status)
+    }
+
+    /// Builds a command with the harness environment and without `agents` secrets.
+    fn command(
+        &self,
+        program: impl AsRef<OsStr>,
+        args: &[String],
+        secrets: &[&EnvName],
+    ) -> Command {
+        let mut command = Command::new(program);
+        command.current_dir(&self.cwd).args(args);
+        for name in &self.reference_env {
+            command.env_remove(name);
+        }
+        for (name, value) in &self.child_env {
+            match value {
+                Some(value) => command.env(name, value),
+                None => command.env_remove(name),
+            };
+        }
+        for secret in secrets {
+            command.env_remove(secret);
+        }
+        command
+    }
+
+    fn hook(&self, argv: &[String], secrets: &[&EnvName]) -> Result<()> {
+        let Some((program, args)) = argv.split_first() else {
+            return Ok(());
+        };
+        let status = self
+            .command(program, args, secrets)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .status()
+            .with_context(|| format!("run {program}"))?;
+        ensure!(status.success(), "{program} failed ({status})");
+        Ok(())
     }
 }
 
-fn relay_session_events(
-    pipe: &mut impl BufRead,
-    event: &SessionIdEvent,
-    observe: &mut impl FnMut(String),
+/// Copies one output stream through `script`, line by line, in a scope that
+/// keeps state for the whole run.
+fn relay(
+    stream: &str,
+    pipe: impl Read,
+    script: &Script,
+    context: &Value,
+    report: &impl Fn(String),
 ) -> Result<()> {
+    let sandbox = Sandbox::new()?;
+    let scope = sandbox.scope(context)?;
+    let mut pipe = BufReader::new(pipe);
     let mut line = Vec::new();
-    let mut found = false;
     while pipe.read_until(b'\n', &mut line)? != 0 {
-        if !found
-            && let Ok(value) = serde_json::from_slice::<serde_json::Value>(&line)
-            && value["type"].as_str() == Some(event.event.as_str())
-            && let Some(id) = value.get(&event.field).and_then(serde_json::Value::as_str)
-            && valid_native_id(id)
-            && (!event.uuid || uuid::Uuid::parse_str(id).is_ok())
-        {
-            found = true;
-            observe(id.to_owned());
+        let text = String::from_utf8_lossy(&line);
+        let globals = json!({ "stream": stream, "line": text.trim_end_matches(['\n', '\r']) });
+        let action: LineAction = serde_json::from_value(match scope.eval(script, &globals)? {
+            Value::Null => json!({}),
+            value => value,
+        })
+        .context("expected null or an object with `line` and `session`")?;
+        if let Some(id) = action.session {
+            ensure!(valid_native_id(&id), "invalid native session ID {id:?}");
+            report(id);
         }
-        io::stdout().lock().write_all(&line)?;
+        let output = match action.line {
+            None => Some(line.clone()),
+            Some(None) => None,
+            Some(Some(text)) => Some(format!("{text}\n").into_bytes()),
+        };
+        if let Some(output) = output {
+            if stream == "stdout" {
+                io::stdout().lock().write_all(&output)?;
+            } else {
+                io::stderr().lock().write_all(&output)?;
+            }
+        }
         line.clear();
     }
     Ok(())
@@ -402,25 +483,4 @@ fn valid_native_id(id: &str) -> bool {
         && id
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-}
-
-fn templates() -> Environment<'static> {
-    let mut env = Environment::new();
-    env.set_undefined_behavior(UndefinedBehavior::Strict);
-    env.set_auto_escape_callback(|_| AutoEscape::None);
-    env.set_keep_trailing_newline(true);
-    env.add_filter(
-        "totoml",
-        |ViaDeserialize(value): ViaDeserialize<serde_json::Value>| {
-            toml::Value::try_from(value)
-                .map(|value| value.to_string())
-                .map_err(|error| {
-                    Error::new(
-                        ErrorKind::InvalidOperation,
-                        format!("encode TOML value: {error}"),
-                    )
-                })
-        },
-    );
-    env
 }

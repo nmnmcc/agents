@@ -16,7 +16,7 @@ use std::{
     process::{ExitCode, ExitStatus},
 };
 
-pub(crate) fn execute(
+pub fn execute(
     project: Project,
     task: impl io::Read,
     mail: &MailConfig,
@@ -46,7 +46,7 @@ fn execute_in(
 ) -> Result<ExitStatus> {
     let secrets = mail.secrets();
     let Some((routes, mailbox)) = identity else {
-        return Plan::render(&project, path)?.execute(path, task, &secrets);
+        return Plan::render(&project, path, None)?.execute(path, task, &secrets, |_| {});
     };
     let name: Id = "agents-mail".parse().expect("built-in MCP identifier");
     ensure!(
@@ -94,8 +94,8 @@ fn execute_in(
     } else {
         (None, None)
     };
-    let plan = Plan::render_with_session(&project, path, session.as_ref())?;
-    let captured_id = plan.captures_session_id().then(SessionId::default);
+    let plan = Plan::render(&project, path, session.as_ref())?;
+    let reported_id = plan.reports_session_id().then(SessionId::default);
     let (label, context) = if let Some(trigger) = trigger {
         (
             "The new message in this mail thread",
@@ -112,7 +112,7 @@ fn execute_in(
         &socket,
         |request| match request {
             Request::Send(request) => {
-                if let (Some(id), Some(sessions)) = (&captured_id, sessions.as_mut()) {
+                if let (Some(id), Some(sessions)) = (&reported_id, sessions.as_mut()) {
                     sessions.set_native_id(id.get()?);
                 }
                 access.send(request, sessions.as_mut())
@@ -120,30 +120,27 @@ fn execute_in(
             request => access.handle(request),
         },
         || {
-            let status =
-                plan.execute_observing(path, io::Cursor::new(prefix).chain(task), &secrets, |id| {
-                    if let Some(captured) = &captured_id {
-                        captured.finish(Some(id));
-                    }
-                });
-            if let Some(captured) = &captured_id {
-                captured.finish(None);
+            let input = io::Cursor::new(prefix).chain(task);
+            let status = plan.execute(path, input, &secrets, |id| {
+                if let Some(reported) = &reported_id {
+                    reported.finish(Some(id));
+                }
+            });
+            if let Some(reported) = &reported_id {
+                reported.finish(None);
             }
             status
         },
     )?;
     if let Some(mut sessions) = sessions {
-        let has_session = if let Some(captured) = captured_id {
-            match captured.get() {
-                Ok(id) => {
-                    sessions.set_native_id(id);
-                    true
-                }
-                Err(error) if status.success() => return Err(error),
-                Err(_) => false,
+        let has_session = match reported_id.map(|id| id.get()) {
+            None => status.success(),
+            Some(Ok(id)) => {
+                sessions.set_native_id(id);
+                true
             }
-        } else {
-            status.success()
+            Some(Err(error)) if status.success() => return Err(error),
+            Some(Err(_)) => false,
         };
         if has_session && event.is_some() {
             sessions.save()?;

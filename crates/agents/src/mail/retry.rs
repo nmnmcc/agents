@@ -85,7 +85,7 @@ pub struct QueueEntry<'a> {
     pub created: u64,
     pub due: u64,
     pub message: &'a [u8],
-    pub recipient: Option<&'a str>,
+    pub recipient: &'a str,
 }
 
 impl<'a> QueueEntry<'a> {
@@ -94,7 +94,7 @@ impl<'a> QueueEntry<'a> {
             created: now,
             due: now,
             message,
-            recipient: Some(recipient),
+            recipient,
         }
     }
 
@@ -104,13 +104,15 @@ impl<'a> QueueEntry<'a> {
             .position(|&b| b == b'\n')
             .context("missing queue header")?;
         let header = std::str::from_utf8(&raw[..line_end])?.trim_end_matches('\r');
-        let (created, due) = header
+        let mut fields = header
             .strip_prefix(HEADER)
-            .and_then(|text| text.split_once(' '))
-            .context("invalid queue header")?;
-        let (due, recipient) = due
-            .split_once(' ')
-            .map_or((due, None), |(due, to)| (due, Some(to)));
+            .context("invalid queue header")?
+            .splitn(3, ' ');
+        let (Some(created), Some(due), Some(recipient)) =
+            (fields.next(), fields.next(), fields.next())
+        else {
+            anyhow::bail!("invalid queue header");
+        };
         let (created, due) = (created.parse()?, due.parse()?);
         ensure!(created <= due, "queue time is later than retry time");
         Ok(Self {
@@ -122,12 +124,11 @@ impl<'a> QueueEntry<'a> {
     }
 
     pub fn encode(&self) -> Vec<u8> {
-        let mut raw = format!("{HEADER}{} {}", self.created, self.due).into_bytes();
-        if let Some(to) = self.recipient {
-            raw.push(b' ');
-            raw.extend_from_slice(to.as_bytes());
-        }
-        raw.extend_from_slice(b"\r\n");
+        let mut raw = format!(
+            "{HEADER}{} {} {}\r\n",
+            self.created, self.due, self.recipient
+        )
+        .into_bytes();
         raw.extend_from_slice(self.message);
         raw
     }
@@ -157,7 +158,7 @@ mod tests {
         entry.due = 40;
         let encoded = entry.encode();
         let decoded = QueueEntry::read(&encoded).unwrap();
-        assert_eq!(decoded.recipient, Some("hidden@example.test"));
+        assert_eq!(decoded.recipient, "hidden@example.test");
         assert_eq!(
             (decoded.created, decoded.due, decoded.message),
             (20, 40, &message[..])

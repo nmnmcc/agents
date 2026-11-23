@@ -1,6 +1,6 @@
 use super::support::{Fixture, cli, copy_sample_harness_layer, sample_project};
 use serde_json::{Value, json};
-use std::{fs, io::Write, path::Path, process::Stdio};
+use std::{fs, io::Write, os::unix::fs::PermissionsExt, path::Path, process::Stdio};
 
 #[test]
 fn previews_and_runs_from_nested_directory() {
@@ -71,7 +71,7 @@ fn previews_and_runs_from_nested_directory() {
 fn selected_agent_chooses_its_own_harness_and_model() {
     let mut fixture = Fixture::new();
     fixture.project["harnesses"]["build"] = json!({
-        "version": 1, "program": "/bin/sh",
+        "program": "/bin/sh",
         "args": ["-c", "printf '%s' \"$1\"", "build", "{{ model }}"]
     });
     fixture.project["agents"]["builder"] = json!({
@@ -125,16 +125,12 @@ fn selected_agent_chooses_its_own_harness_and_model() {
 }
 
 #[test]
-fn conditional_arguments_use_their_position_and_skip_inactive_groups() {
+fn script_arguments_keep_their_position_and_expand_to_any_count() {
     let mut fixture = Fixture::new();
     let mut config = fixture.project["harnesses"]["review"].clone();
     config["args"] = json!([
         "before",
-        {"when": "model is not none", "args": [
-            "--model", "{{ model }}",
-            {"when": "mcp.search is defined", "args": ["--search"]}
-        ]},
-        {"when": "false", "args": [{"template": "not-loaded.j2"}]},
+        {"js": "model === null ? null : ['--model', model, ...('search' in mcp ? ['--search'] : [])]"},
         "after"
     ]);
     let render = |fixture: &mut Fixture, config: &Value| {
@@ -168,10 +164,48 @@ fn conditional_arguments_use_their_position_and_skip_inactive_groups() {
     let plan: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(plan["args"], json!(["before", "after"]));
 
-    config["args"][1]["when"] = json!("42");
-    let output = render(&mut fixture, &config);
-    assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("`when` must evaluate to a boolean"));
+    for script in ["42", "[1]"] {
+        config["args"][1] = json!({ "js": script });
+        let output = render(&mut fixture, &config);
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("expected a"));
+    }
+}
+
+#[test]
+fn javascript_renders_arguments_environment_and_files() {
+    let mut fixture = Fixture::new();
+    let mut config = fixture.project["harnesses"]["review"].clone();
+    config["args"] = json!([
+        {"js": "['--model', model]"},
+        {"js": "null"},
+        {"js": "agent.id.toUpperCase()"}
+    ]);
+    config["env"] = json!({"AGENTS_TEST_INJECT": {"js": "`${agent.id}:${model}`"}, "AGENTS_TEST_REMOVE": {"js": "null"}});
+    config["files"]["native.json"]["template"] =
+        json!({"js": "({agent: agent.id, mcp: Object.keys(mcp)})"});
+    fixture.project["harnesses"]["review"] = config;
+    fixture.save();
+    let output = fixture
+        .command()
+        .args(["config", "render"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let plan: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(plan["args"], json!(["--model", "test model", "REVIEWER"]));
+    assert_eq!(
+        plan["child_env"]["AGENTS_TEST_INJECT"],
+        "reviewer:test model"
+    );
+    assert_eq!(plan["child_env"]["AGENTS_TEST_REMOVE"], Value::Null);
+    let native: Value =
+        serde_json::from_str(plan["files"]["native.json"].as_str().unwrap()).unwrap();
+    assert_eq!(native, json!({"agent": "reviewer", "mcp": ["search"]}));
 }
 
 #[test]
@@ -264,7 +298,6 @@ fn adapters_translate_the_same_agent_and_both_mcp_transports() {
         plans[2]["child_env"]["OPENCODE_CONFIG"],
         "<run-dir>/opencode.json"
     );
-    assert_eq!(plans[2]["child_env"]["OPENCODE_DB"], ":memory:");
     assert_eq!(opencode["agents"]["agents-reviewer"]["mode"], "primary");
     assert!(
         opencode["agents"]["agents-reviewer"]["system"]
@@ -277,4 +310,62 @@ fn adapters_translate_the_same_agent_and_both_mcp_transports() {
         json!(["example", "a b"])
     );
     assert_eq!(opencode["mcp"]["servers"]["remote"]["type"], "remote");
+}
+
+#[test]
+fn hooks_surround_the_run_and_filter_its_output() {
+    let mut fixture = Fixture::new();
+    let program = fixture.root.join("hooked");
+    fs::write(
+        &program,
+        "#!/bin/sh\nprintf 'one\\nskip\\ntwo\\n'\nprintf 'warn\\n' >&2\nexit 3\n",
+    )
+    .unwrap();
+    fs::set_permissions(&program, fs::Permissions::from_mode(0o700)).unwrap();
+    fixture.project["harnesses"]["review"] = json!({
+        "program": program,
+        "args": [],
+        "capabilities": {"mcp": ["stdio"], "skills": true},
+        "hooks": {
+            "before": [["sh", "-c", "echo \"before $AGENTS_HOOK\" >> hooks.log"]],
+            "after": [[{"js": "['sh', '-c', `echo after ${status} >> hooks.log`]"}]],
+            "stdout": {"js": "globalThis.n = (globalThis.n ?? 0) + 1; \
+                line === 'skip' ? {line: null} : {line: `${n}:${line}`}"},
+            "stderr": {"js": "({line: `${stream}:${line}`})"}
+        },
+        "env": {"AGENTS_HOOK": "{{ agent.id }}"}
+    });
+    fixture.save();
+    let run = |fixture: &Fixture| {
+        fixture
+            .command()
+            .arg("run")
+            .stdin(Stdio::null())
+            .output()
+            .unwrap()
+    };
+    let output = run(&fixture);
+    assert_eq!(output.status.code(), Some(3), "{output:?}");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "1:one\n3:two\n");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("stderr:warn\n"));
+    let log = fixture.root.join("hooks.log");
+    assert_eq!(
+        fs::read_to_string(&log).unwrap(),
+        "before reviewer\nafter 3\n"
+    );
+
+    fs::remove_file(&log).unwrap();
+    fixture.project["harnesses"]["review"]["hooks"]["before"] = json!([[], ["false"]]);
+    fixture.save();
+    let output = run(&fixture);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("hooks.before[1]"));
+    assert!(output.stdout.is_empty() && !log.exists());
+
+    fixture.project["harnesses"]["review"]["hooks"] = json!({"stdout": {"js": "'bad'"}});
+    fixture.project["harnesses"]["review"]["capabilities"]["sessions"] = json!("reported");
+    fixture.save();
+    let output = run(&fixture);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("hooks.stdout"));
 }

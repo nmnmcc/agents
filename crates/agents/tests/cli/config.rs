@@ -6,9 +6,9 @@ use std::{fs, os::unix::fs::symlink, path::Path, process::Stdio};
 fn complete_project_sample_renders_when_copied_to_the_active_name() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();
-    let sample = root.join(".agents.sample.json");
+    let sample = root.join("mail.agents.json");
     fs::copy(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.agents.sample.json"),
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/mail.agents.json"),
         &sample,
     )
     .unwrap();
@@ -378,7 +378,7 @@ fn external_references_merge_before_resolution_and_are_hidden_in_preview() {
                 "FILE": {"env": "AGENTS_TEST_SUPERSEDED"}
             }}},
             "harnesses": {"fake": {
-                "version": 1, "program": "/bin/sh", "capabilities": {"mcp": ["stdio"]},
+                "program": "/bin/sh", "capabilities": {"mcp": ["stdio"]},
                 "args": ["-c", r#"test "${AGENTS_TEST_REFERENCE-unset}" = unset &&
                     test "$1" = 'env-value' && test "$2" = "$(printf 'file-value\n.')" && printf ok"#,
                     "test", "{{ mcp.tool.env.TOKEN }}", "{{ mcp.tool.env.FILE }}."]
@@ -638,7 +638,7 @@ fn harnesses_require_project_definitions_and_merge_with_later_layers() {
         layers.join("10-harness.json"),
         json!({
             "harnesses": {"claude": {
-                "version": 1, "program": "custom-claude",
+                "program": "custom-claude",
                 "args": ["base"],
                 "stdin": "Task: {{ task }}"
             }}
@@ -651,7 +651,7 @@ fn harnesses_require_project_definitions_and_merge_with_later_layers() {
             layers.join("20-override.json"),
             json!({
                 "harnesses": {"claude": {
-                    "args": [{"when": "true", "args": [{"template": text}]}]
+                    "args": [text]
                 }}
             })
             .to_string(),

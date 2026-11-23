@@ -1,10 +1,10 @@
 use super::{LocatedProject, Project, Workspace};
 use crate::{
     mail::MailConfig,
+    template::{Renderer, Template},
     types::{AgentSelector, Id, MailAddress, RelativePath},
 };
 use anyhow::{Context, Result, ensure};
-use minijinja::{Environment, UndefinedBehavior, context};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -20,7 +20,7 @@ pub(super) struct ProjectMail {
     /// Optional root for discovering mail identities, relative to this project.
     workspace: Option<PathBuf>,
     /// Default address template for agents in this project.
-    address: Option<String>,
+    address: Option<Template>,
     /// Where local mbox files are stored, relative to the project.
     directory: Option<RelativePath>,
     #[serde(default)]
@@ -42,8 +42,8 @@ pub(super) struct ProjectMail {
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(super) struct AgentMail {
-    /// Address or MiniJinja template overriding the project default.
-    address: Option<String>,
+    /// Address template overriding the project default.
+    address: Option<Template>,
     from: Option<Vec<AgentSelector>>,
     to: Option<Vec<AgentSelector>>,
 }
@@ -208,8 +208,6 @@ impl Workspace {
     }
 
     fn routes_from(&self, root: PathBuf) -> Result<MailRoutes> {
-        let mut env = Environment::new();
-        env.set_undefined_behavior(UndefinedBehavior::Strict);
         let mut routes = MailRoutes {
             root: root.clone(),
             entries: BTreeMap::new(),
@@ -222,17 +220,7 @@ impl Workspace {
                 LocatedProject::find(&directory)?.map(Rc::new)
             };
             if let Some(project) = entry {
-                let project_default = project
-                    .config
-                    .mail
-                    .address
-                    .as_deref()
-                    .map(|text| env.template_from_str(text))
-                    .transpose()
-                    .with_context(|| {
-                        format!("compile mail.address in {}", project.root.display())
-                    })?;
-                let default = project_default.as_ref();
+                let default = project.config.mail.address.as_ref();
                 let name = project
                     .root
                     .file_name()
@@ -253,16 +241,18 @@ impl Workspace {
                     }
                     let source =
                         || format!("mail address for {agent} in {}", project.root.display());
-                    let address_override = definition
+                    let template = definition
                         .mail
                         .as_ref()
-                        .and_then(|mail| mail.address.as_deref())
-                        .map(|text| env.template_from_str(text))
-                        .transpose()
-                        .with_context(|| format!("compile {}", source()))?;
-                    let address = address_override.as_ref().or(default)
-                        .with_context(|| format!("no {}", source()))?
-                        .render(context! { project => context! { name => name.as_ref(), path => path.as_ref() }, agent => context! { id => &agent } })
+                        .and_then(|mail| mail.address.as_ref())
+                        .or(default)
+                        .with_context(|| format!("no {}", source()))?;
+                    let context = serde_json::json!({
+                        "project": {"name": name, "path": path},
+                        "agent": {"id": agent},
+                    });
+                    let address = Renderer::new(context)?
+                        .string(template)
                         .with_context(|| format!("render {}", source()))?
                         .parse::<MailAddress>()
                         .map_err(anyhow::Error::msg)

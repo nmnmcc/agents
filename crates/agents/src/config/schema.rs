@@ -70,7 +70,7 @@ fn allow_value_references(schema: &mut Value) {
     };
     if let Some(properties) = object.get_mut("properties").and_then(Value::as_object_mut) {
         for (name, child) in properties {
-            if !matches!(name.as_str(), "$schema" | "password" | "password_env") {
+            if !matches!(name.as_str(), "$schema" | "password") {
                 allow_value_references(child);
             }
         }

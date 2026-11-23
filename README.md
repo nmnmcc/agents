@@ -32,12 +32,14 @@ harness keeps the session itself. Replies to mail sent by the agent's
 messages, not native session IDs, and a session link is scoped to an
 authenticated participant.
 
-The watcher requires a session-capable adapter. The Claude Code, Codex,
-and OpenCode V2 samples all provide one. Codex reports its native thread
-ID as a JSON event when it starts a new mail session. OpenCode uses a
-private database in the project mail directory and checks that the
-session exists before attempting to resume it. If an existing session
-cannot be resumed, `agents` reports the error rather than starting a new one.
+The watcher requires a session-capable adapter. `agents` supplies a session
+ID and treats every harness the same way; each difference lives in its
+adapter. The Claude Code, Codex, and OpenCode V2 samples are all
+session-capable. Codex assigns its own thread ID, so its adapter declares
+`sessions: reported` and a `stdout` hook reads the ID from the JSON event
+stream. OpenCode would start a new session for an unknown ID, so its adapter
+checks with a `before` hook before resuming. If an existing session cannot be resumed, the run fails rather
+than starting a new one.
 
 ### Run it as a user service
 
@@ -157,9 +159,9 @@ second command only after approving that text as a task. It does not reply.
 Use addresses your mail server routes to and authorizes for submission.
 Keep local mbox storage and configure `mail.transport.smtp` for outgoing
 mail, or also set `mail.transport.imap` and `mail.transport.outbox` to use
-external storage. See the [sample project configuration](.agents.sample.json)
-for SMTP. For IMAP, use a dedicated inbox and private outbox; the outbox
-must support permanent custom keywords.
+external storage. See the [mail sample](samples/mail.agents.json) for SMTP.
+For IMAP, use a dedicated inbox and private outbox; the outbox must support
+permanent custom keywords.
 
 With local storage, have a trusted gateway deposit incoming mail:
 
@@ -200,8 +202,8 @@ The [sample project](samples/project) includes an
 [adapter layer](samples/project/.agents.d/00-harnesses.yaml)
 and a skill under `.agents/skills/`. Copy the project, including its dotfiles,
 to use it as a starting point. For a two-agent mail setup, use
-[`.agents.sample.json`](.agents.sample.json) as your `.agents.json` and keep
-the adapter layer. Replace or remove the sample MCP and mail endpoints
+[`samples/mail.agents.json`](samples/mail.agents.json) as your `.agents.json`
+and keep the adapter layer. Replace or remove the sample MCP and mail endpoints
 and adjust the addresses. Samples are templates; `agents` only loads
 configuration from your project and does not fall back to the samples.
 Use the [generated schema](agents.schema.json) for
@@ -236,10 +238,41 @@ cargo run --locked -q -p agents -- config schema > agents.schema.json
 
 Harness adapters are project configuration, not separate installations.
 Each defines a program, arguments, capabilities, and any temporary files.
-MiniJinja renders arguments individually, without a shell. Arguments,
+Arguments are rendered individually, without a shell. Arguments,
 environment overrides, and generated files apply only to that invocation;
 `agents` does not rewrite global or harness settings. Run only trusted
 projects and adapters: `agents` is not a sandbox.
+
+Every templated value (arguments, environment overrides, generated files,
+`stdin`, hook commands, and mail addresses) is either a
+MiniJinja string or `{ "js": "..." }`. JavaScript runs in a fresh QuickJS
+context with no I/O and with memory, stack, and time limits. The template
+context is available as global variables, and the value of the last statement
+is the result. An argument script may return an array of arguments or `null`
+for none, which is how optional arguments are written; an environment script may return `null` to remove the variable; a
+`json` file script may return any JSON value.
+
+```yaml
+env:
+  OPENCODE_DB: { js: 'session === null ? ":memory:" : null' }
+```
+
+Hooks adapt a harness without changing `agents`:
+
+- `hooks.before` and `hooks.after` are commands, each an argument list whose
+  first element is the program (`program` names the harness). They run in
+  order in the project directory with the harness environment; an empty list
+  is skipped. A failing `before` command aborts the run, and a failing
+  `after` command fails it. `after` commands also see the exit code as
+  `status`, or `null` after a signal.
+- `hooks.stdout` and `hooks.stderr` are scripts run on each output line, as
+  `line`, with `stream` naming the stream. Return `null` to pass the line
+  through, or an object: `line` replaces it (`null` drops it) and `session`
+  reports a native session ID. `const` and `let` last one line; state kept on
+  `globalThis` lasts the whole run.
+- `capabilities.sessions` is `none`, `supplied` (the harness uses the ID
+  `agents` supplies), or `reported` (an output hook reports the harness's own
+  ID for a new session).
 
 ## Development
 
@@ -255,7 +288,20 @@ Run the E2E test as a regular user. It builds the locked workspace, starts
 Dovecot and a test SMTP server on loopback, and uses a fake harness. It needs
 no Docker, root privileges, real mail accounts, or harness login.
 
-The Rust binary keeps command-line parsing and stdin/stdout in `cli/`, project
-loading and address resolution in `config/`, and mailbox operations and the MCP
-bridge in `mail/`. `harness.rs` renders and launches adapters; `daemon.rs` polls
-mail and calls the same runner as the CLI. Integration tests live in `tests/cli/`.
+Source layout, under `crates/agents/src/`:
+
+- `cli/`: argument parsing and stdin/stdout; no logic of its own.
+- `config/`: project discovery, layer merging, value references, mail routing,
+  and the JSON Schema.
+- `harness.rs`: renders an adapter into a plan and launches it.
+- `template.rs`: MiniJinja and sandboxed QuickJS evaluation of configured
+  values.
+- `mail/`: mailboxes (local mbox or IMAP), the outbox and its retries, native
+  session bindings, and the per-run `agents-mail` MCP bridge.
+- `daemon.rs`: the default command; polls mail and calls the same runner as
+  `agents run`.
+- `service.rs`: user service definitions for systemd and launchd.
+- `types.rs`: validated string types shared by all of the above.
+
+Integration tests live in `tests/cli/`; the live mail test is
+`tests/mail_e2e.py`.

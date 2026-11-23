@@ -50,7 +50,7 @@ resume=false
 json=false
 if [ "$AGENTS_TEST_HARNESS" = opencode ]; then
     test "$1" = --standalone
-    test "$OPENCODE_DB" = "$PWD/.agents/mail/opencode-builder.sqlite"
+    test -z "${OPENCODE_DB+set}"
     if [ "$2" = api ]; then
         test "$3" = get
         printf 'checked %s\n' "${4##*/}" >> checked-sessions

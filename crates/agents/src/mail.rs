@@ -1,8 +1,8 @@
 mod inbox;
-pub(crate) mod mcp;
-pub(crate) mod message;
+pub mod mcp;
+pub mod message;
 mod outbox;
-pub(crate) mod request;
+pub mod request;
 mod retry;
 mod run;
 mod sessions;
@@ -32,10 +32,10 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
 };
-use store::Session;
+use store::Folder;
 
 pub use outbox::{deliver, flush, pending};
-pub(crate) use run::execute;
+pub use run::execute;
 pub use sessions::SessionBusy;
 
 #[derive(Default, Deserialize, JsonSchema)]
@@ -51,9 +51,9 @@ pub struct MailConfig {
 }
 
 impl MailConfig {
-    fn open(&self, root: &Path, directory: &Path, outbox: bool) -> Result<Session> {
+    fn open(&self, root: &Path, directory: &Path, outbox: bool) -> Result<Folder> {
         let Some(incoming) = &self.imap else {
-            return Session::local(
+            return Folder::local(
                 root,
                 directory,
                 if outbox { "outbox.mbox" } else { "inbox.mbox" },
@@ -69,20 +69,19 @@ impl MailConfig {
         } else {
             (incoming.mailbox.as_str(), &[][..])
         };
-        Session::imap(transport::connect(incoming, root)?, name, keywords)
+        Folder::imap(transport::connect(incoming, root)?, name, keywords)
     }
 
     fn secrets(&self) -> Vec<&EnvName> {
-        self.imap
+        let incoming = self.imap.as_ref().map(|incoming| &incoming.login);
+        let outgoing = self
+            .smtp
             .as_ref()
-            .and_then(|incoming| incoming.login.password_env())
+            .and_then(|outgoing| outgoing.login.as_ref());
+        incoming
             .into_iter()
-            .chain(
-                self.smtp
-                    .as_ref()
-                    .and_then(|outgoing| outgoing.login.as_ref())
-                    .and_then(transport::Login::password_env),
-            )
+            .chain(outgoing)
+            .filter_map(transport::Login::password_env)
             .collect()
     }
 }
@@ -141,10 +140,6 @@ impl AddressPolicy {
 }
 
 impl<'a> MailAccess<'a> {
-    pub fn unread_refs(&self) -> Result<BTreeSet<MailRef>> {
-        self.inbox()?.unread_refs()
-    }
-
     pub fn new(mail: &'a MailConfig, routes: &MailRoutes, mailbox: &AgentMailbox) -> Result<Self> {
         let address = mailbox.address().clone();
         let peers = routes.peers(mailbox)?;
@@ -162,6 +157,10 @@ impl<'a> MailAccess<'a> {
             cc: cc.to_vec(),
             bcc: bcc.to_vec(),
         })
+    }
+
+    pub fn unread_refs(&self) -> Result<BTreeSet<MailRef>> {
+        self.inbox()?.unread_refs()
     }
 
     fn inbox(&self) -> Result<Inbox<'_>> {
@@ -242,9 +241,7 @@ impl<'a> MailAccess<'a> {
             }
             Ok(addresses)
         };
-        to.extend(resolve(
-            request.agent.into_iter().chain(request.to).collect(),
-        )?);
+        to.extend(resolve(request.to)?);
         cc.extend(resolve(request.cc)?);
         resolve(request.bcc)?;
         ensure!(!recipients.is_empty(), "at least one recipient is required");

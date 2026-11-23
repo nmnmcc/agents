@@ -1,4 +1,4 @@
-use super::print_json;
+use super::{print_json, run_agent};
 use crate::{
     config::Workspace,
     mail::{
@@ -83,7 +83,6 @@ impl Recipients {
         let mut body = String::new();
         io::stdin().lock().read_to_string(&mut body)?;
         Ok(Request::Send(SendMail {
-            agent: None,
             to: self.to,
             cc: self.cc,
             bcc: self.bcc,
@@ -320,13 +319,12 @@ impl Action {
             Self::Run { recipient } => {
                 let routes = workspace.mail_routes()?;
                 let route = routes.route(&recipient)?;
-                let target = Workspace::at_mailbox(route);
-                let (project, routes) = target.project_for_run(Some(&route.agent))?;
-                let identity = routes
-                    .as_ref()
-                    .and_then(|routes| routes.identity(&project).map(|agent| (routes, agent)));
                 let task = message::Task::read(io::stdin().lock())?;
-                mail::execute(project, task.body.as_bytes(), target.mail(), identity, None)
+                run_agent(
+                    &Workspace::at_mailbox(route),
+                    Some(&route.agent),
+                    task.body.as_bytes(),
+                )
             }
         }
     }

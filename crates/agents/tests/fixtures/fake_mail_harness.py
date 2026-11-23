@@ -114,7 +114,7 @@ def main():
                     14,
                     "send_mail",
                     {
-                        "agent": "review",
+                        "to": ["review"],
                         "subject": "Review it",
                         "body": "Please review",
                     },

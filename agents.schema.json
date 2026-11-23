@@ -11,19 +11,13 @@
       "type": "object",
       "properties": {
         "address": {
+          "description": "Address template overriding the project default.",
           "anyOf": [
             {
-              "description": "Address or MiniJinja template overriding the project default.",
-              "type": [
-                "string",
-                "null"
-              ]
+              "$ref": "#/$defs/Template"
             },
             {
-              "$ref": "#/$defs/EnvReference"
-            },
-            {
-              "$ref": "#/$defs/FileReference"
+              "type": "null"
             }
           ]
         },
@@ -63,82 +57,6 @@
         }
       ]
     },
-    "Arg": {
-      "anyOf": [
-        {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "$ref": "#/$defs/EnvReference"
-            },
-            {
-              "$ref": "#/$defs/FileReference"
-            }
-          ]
-        },
-        {
-          "$ref": "#/$defs/ArgTemplate"
-        },
-        {
-          "$ref": "#/$defs/ArgGroup"
-        }
-      ]
-    },
-    "ArgGroup": {
-      "type": "object",
-      "properties": {
-        "args": {
-          "description": "Arguments emitted at this position when the condition is true.",
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/Arg"
-          }
-        },
-        "when": {
-          "anyOf": [
-            {
-              "description": "MiniJinja expression that must evaluate to a boolean.",
-              "type": "string"
-            },
-            {
-              "$ref": "#/$defs/EnvReference"
-            },
-            {
-              "$ref": "#/$defs/FileReference"
-            }
-          ]
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "when",
-        "args"
-      ]
-    },
-    "ArgTemplate": {
-      "type": "object",
-      "properties": {
-        "template": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "$ref": "#/$defs/EnvReference"
-            },
-            {
-              "$ref": "#/$defs/FileReference"
-            }
-          ]
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "template"
-      ]
-    },
     "Artifact": {
       "type": "object",
       "properties": {
@@ -146,17 +64,8 @@
           "$ref": "#/$defs/Format"
         },
         "template": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "$ref": "#/$defs/EnvReference"
-            },
-            {
-              "$ref": "#/$defs/FileReference"
-            }
-          ]
+          "description": "JavaScript may return any JSON value for a `json` file.",
+          "$ref": "#/$defs/Template"
         }
       },
       "additionalProperties": false,
@@ -175,9 +84,7 @@
           }
         },
         "sessions": {
-          "description": "Can create and resume a persistent native session using the supplied session ID.",
-          "type": "boolean",
-          "default": false
+          "$ref": "#/$defs/Sessions"
         },
         "skills": {
           "type": "boolean",
@@ -284,16 +191,10 @@
     "Harness": {
       "type": "object",
       "properties": {
-        "$schema": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
         "args": {
           "type": "array",
           "items": {
-            "$ref": "#/$defs/Arg"
+            "$ref": "#/$defs/Template"
           }
         },
         "capabilities": {
@@ -306,9 +207,13 @@
           "default": {},
           "patternProperties": {
             "^[A-Za-z_][A-Za-z0-9_]*$(?![\\s\\S])": {
-              "type": [
-                "string",
-                "null"
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Template"
+                },
+                {
+                  "type": "null"
+                }
               ]
             }
           }
@@ -322,56 +227,79 @@
             }
           }
         },
+        "hooks": {
+          "$ref": "#/$defs/Hooks",
+          "default": {}
+        },
         "program": {
           "$ref": "#/$defs/Program"
         },
-        "session_id_event": {
-          "description": "Read a native session ID from a JSONL event on stdout when starting a mail session.",
+        "stdin": {
+          "description": "Renders the harness input from `task`.",
           "anyOf": [
             {
-              "$ref": "#/$defs/SessionIdEvent"
+              "$ref": "#/$defs/Template"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "program",
+        "args"
+      ]
+    },
+    "Hooks": {
+      "description": "Programs and scripts around one harness run. Commands run in the project\ndirectory with the harness environment; each is an argument list whose\nfirst element is the program, and an empty list is skipped.",
+      "type": "object",
+      "properties": {
+        "after": {
+          "description": "Commands run in order after the harness exits, with its exit code as\n`status` (null if killed by a signal); any failure fails the run.",
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/Template"
+            }
+          }
+        },
+        "before": {
+          "description": "Commands run in order before the harness starts; any failure aborts the run.",
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/Template"
+            }
+          }
+        },
+        "stderr": {
+          "description": "Script run on each line of harness stderr.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Script"
             },
             {
               "type": "null"
             }
           ]
         },
-        "session_resume_check": {
-          "description": "Arguments for a command that must succeed before resuming a mail session.",
-          "type": [
-            "array",
-            "null"
-          ],
-          "items": {
-            "$ref": "#/$defs/Arg"
-          }
-        },
-        "stdin": {
+        "stdout": {
+          "description": "Script run on each line of harness stdout.",
           "anyOf": [
             {
-              "type": [
-                "string",
-                "null"
-              ]
+              "$ref": "#/$defs/Script"
             },
             {
-              "$ref": "#/$defs/EnvReference"
-            },
-            {
-              "$ref": "#/$defs/FileReference"
+              "type": "null"
             }
           ]
-        },
-        "version": {
-          "$ref": "#/$defs/Version"
         }
       },
-      "additionalProperties": false,
-      "required": [
-        "version",
-        "program",
-        "args"
-      ]
+      "additionalProperties": false
     },
     "Id": {
       "anyOf": [
@@ -513,32 +441,6 @@
         "instructions"
       ]
     },
-    "LegacyLogin": {
-      "type": "object",
-      "properties": {
-        "password_env": {
-          "$ref": "#/$defs/EnvName"
-        },
-        "username": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "$ref": "#/$defs/EnvReference"
-            },
-            {
-              "$ref": "#/$defs/FileReference"
-            }
-          ]
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "username",
-        "password_env"
-      ]
-    },
     "ListMail": {
       "type": "object",
       "properties": {
@@ -566,13 +468,29 @@
       "additionalProperties": false
     },
     "Login": {
-      "anyOf": [
-        {
-          "$ref": "#/$defs/SourceLogin"
+      "type": "object",
+      "properties": {
+        "password": {
+          "$ref": "#/$defs/ValueSource"
         },
-        {
-          "$ref": "#/$defs/LegacyLogin"
+        "username": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "$ref": "#/$defs/EnvReference"
+            },
+            {
+              "$ref": "#/$defs/FileReference"
+            }
+          ]
         }
+      },
+      "additionalProperties": false,
+      "required": [
+        "username",
+        "password"
       ]
     },
     "MailAddress": {
@@ -1014,10 +932,29 @@
                   ],
                   "properties": {
                     "address": {
-                      "description": "Address or MiniJinja template overriding the project default.",
-                      "type": [
-                        "string",
-                        "null"
+                      "description": "Address template overriding the project default.",
+                      "anyOf": [
+                        {
+                          "description": "MiniJinja text, or `{\"js\": \"...\"}`.",
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "description": "JavaScript run in QuickJS with no I/O. The template context is exposed as\nglobal variables; the value of the last statement is the result. Output hooks\nkeep `globalThis` for the whole run; other scripts start from a fresh context.",
+                              "type": "object",
+                              "properties": {
+                                "js": {
+                                  "type": "string"
+                                }
+                              },
+                              "additionalProperties": false
+                            }
+                          ]
+                        },
+                        {
+                          "type": "null"
+                        }
                       ]
                     },
                     "from": {
@@ -1085,40 +1022,19 @@
             "^[a-z0-9_-]+$(?![\\s\\S])": {
               "type": "object",
               "properties": {
-                "$schema": {
-                  "type": [
-                    "string",
-                    "null"
-                  ]
-                },
                 "args": {
                   "type": "array",
                   "items": {
+                    "description": "MiniJinja text, or `{\"js\": \"...\"}`.",
                     "anyOf": [
                       {
                         "type": "string"
                       },
                       {
+                        "description": "JavaScript run in QuickJS with no I/O. The template context is exposed as\nglobal variables; the value of the last statement is the result. Output hooks\nkeep `globalThis` for the whole run; other scripts start from a fresh context.",
                         "type": "object",
                         "properties": {
-                          "template": {
-                            "type": "string"
-                          }
-                        },
-                        "additionalProperties": false
-                      },
-                      {
-                        "type": "object",
-                        "properties": {
-                          "args": {
-                            "description": "Arguments emitted at this position when the condition is true.",
-                            "type": "array",
-                            "items": {
-                              "$ref": "#/$defs/Arg"
-                            }
-                          },
-                          "when": {
-                            "description": "MiniJinja expression that must evaluate to a boolean.",
+                          "js": {
                             "type": "string"
                           }
                         },
@@ -1141,9 +1057,24 @@
                       }
                     },
                     "sessions": {
-                      "description": "Can create and resume a persistent native session using the supplied session ID.",
-                      "type": "boolean",
-                      "default": false
+                      "description": "How the harness identifies persistent native sessions.",
+                      "anyOf": [
+                        {
+                          "description": "No persistent sessions.",
+                          "type": "string",
+                          "const": "none"
+                        },
+                        {
+                          "description": "Creates and resumes sessions under the ID `agents` supplies.",
+                          "type": "string",
+                          "const": "supplied"
+                        },
+                        {
+                          "description": "Assigns its own ID, which an output hook reports for a new session.",
+                          "type": "string",
+                          "const": "reported"
+                        }
+                      ]
                     },
                     "skills": {
                       "type": "boolean",
@@ -1159,9 +1090,28 @@
                   "default": {},
                   "patternProperties": {
                     "^[A-Za-z_][A-Za-z0-9_]*$(?![\\s\\S])": {
-                      "type": [
-                        "string",
-                        "null"
+                      "anyOf": [
+                        {
+                          "description": "MiniJinja text, or `{\"js\": \"...\"}`.",
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "description": "JavaScript run in QuickJS with no I/O. The template context is exposed as\nglobal variables; the value of the last statement is the result. Output hooks\nkeep `globalThis` for the whole run; other scripts start from a fresh context.",
+                              "type": "object",
+                              "properties": {
+                                "js": {
+                                  "type": "string"
+                                }
+                              },
+                              "additionalProperties": false
+                            }
+                          ]
+                        },
+                        {
+                          "type": "null"
+                        }
                       ]
                     }
                   }
@@ -1181,12 +1131,111 @@
                           ]
                         },
                         "template": {
-                          "type": "string"
+                          "description": "JavaScript may return any JSON value for a `json` file.",
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "description": "JavaScript run in QuickJS with no I/O. The template context is exposed as\nglobal variables; the value of the last statement is the result. Output hooks\nkeep `globalThis` for the whole run; other scripts start from a fresh context.",
+                              "type": "object",
+                              "properties": {
+                                "js": {
+                                  "type": "string"
+                                }
+                              },
+                              "additionalProperties": false
+                            }
+                          ]
                         }
                       },
                       "additionalProperties": false
                     }
                   }
+                },
+                "hooks": {
+                  "description": "Programs and scripts around one harness run. Commands run in the project\ndirectory with the harness environment; each is an argument list whose\nfirst element is the program, and an empty list is skipped.",
+                  "type": "object",
+                  "properties": {
+                    "after": {
+                      "description": "Commands run in order after the harness exits, with its exit code as\n`status` (null if killed by a signal); any failure fails the run.",
+                      "type": "array",
+                      "items": {
+                        "type": "array",
+                        "items": {
+                          "description": "MiniJinja text, or `{\"js\": \"...\"}`.",
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "description": "JavaScript run in QuickJS with no I/O. The template context is exposed as\nglobal variables; the value of the last statement is the result. Output hooks\nkeep `globalThis` for the whole run; other scripts start from a fresh context.",
+                              "type": "object",
+                              "properties": {
+                                "js": {
+                                  "type": "string"
+                                }
+                              },
+                              "additionalProperties": false
+                            }
+                          ]
+                        }
+                      }
+                    },
+                    "before": {
+                      "description": "Commands run in order before the harness starts; any failure aborts the run.",
+                      "type": "array",
+                      "items": {
+                        "type": "array",
+                        "items": {
+                          "description": "MiniJinja text, or `{\"js\": \"...\"}`.",
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "description": "JavaScript run in QuickJS with no I/O. The template context is exposed as\nglobal variables; the value of the last statement is the result. Output hooks\nkeep `globalThis` for the whole run; other scripts start from a fresh context.",
+                              "type": "object",
+                              "properties": {
+                                "js": {
+                                  "type": "string"
+                                }
+                              },
+                              "additionalProperties": false
+                            }
+                          ]
+                        }
+                      }
+                    },
+                    "stderr": {
+                      "description": "Script run on each line of harness stderr.",
+                      "type": [
+                        "object",
+                        "null"
+                      ],
+                      "properties": {
+                        "js": {
+                          "type": "string"
+                        }
+                      },
+                      "additionalProperties": false
+                    },
+                    "stdout": {
+                      "description": "Script run on each line of harness stdout.",
+                      "type": [
+                        "object",
+                        "null"
+                      ],
+                      "properties": {
+                        "js": {
+                          "type": "string"
+                        }
+                      },
+                      "additionalProperties": false
+                    }
+                  },
+                  "additionalProperties": false,
+                  "default": {}
                 },
                 "program": {
                   "description": "An absolute executable path or a bare executable name resolved via PATH.",
@@ -1196,78 +1245,31 @@
                     "pattern": "\\u0000"
                   }
                 },
-                "session_id_event": {
-                  "description": "Read a native session ID from a JSONL event on stdout when starting a mail session.",
-                  "type": [
-                    "object",
-                    "null"
-                  ],
-                  "properties": {
-                    "event": {
-                      "description": "Expected value of the JSON event's `type` field.",
-                      "type": "string"
-                    },
-                    "field": {
-                      "description": "JSON field containing the native session ID.",
-                      "type": "string"
-                    },
-                    "uuid": {
-                      "description": "Require a UUID rather than accepting an arbitrary identifier.",
-                      "type": "boolean",
-                      "default": false
-                    }
-                  },
-                  "additionalProperties": false
-                },
-                "session_resume_check": {
-                  "description": "Arguments for a command that must succeed before resuming a mail session.",
-                  "type": [
-                    "array",
-                    "null"
-                  ],
-                  "items": {
-                    "anyOf": [
-                      {
-                        "type": "string"
-                      },
-                      {
-                        "type": "object",
-                        "properties": {
-                          "template": {
-                            "type": "string"
-                          }
+                "stdin": {
+                  "description": "Renders the harness input from `task`.",
+                  "anyOf": [
+                    {
+                      "description": "MiniJinja text, or `{\"js\": \"...\"}`.",
+                      "anyOf": [
+                        {
+                          "type": "string"
                         },
-                        "additionalProperties": false
-                      },
-                      {
-                        "type": "object",
-                        "properties": {
-                          "args": {
-                            "description": "Arguments emitted at this position when the condition is true.",
-                            "type": "array",
-                            "items": {
-                              "$ref": "#/$defs/Arg"
+                        {
+                          "description": "JavaScript run in QuickJS with no I/O. The template context is exposed as\nglobal variables; the value of the last statement is the result. Output hooks\nkeep `globalThis` for the whole run; other scripts start from a fresh context.",
+                          "type": "object",
+                          "properties": {
+                            "js": {
+                              "type": "string"
                             }
                           },
-                          "when": {
-                            "description": "MiniJinja expression that must evaluate to a boolean.",
-                            "type": "string"
-                          }
-                        },
-                        "additionalProperties": false
-                      }
-                    ]
-                  }
-                },
-                "stdin": {
-                  "type": [
-                    "string",
-                    "null"
+                          "additionalProperties": false
+                        }
+                      ]
+                    },
+                    {
+                      "type": "null"
+                    }
                   ]
-                },
-                "version": {
-                  "type": "integer",
-                  "const": 1
                 }
               },
               "additionalProperties": false
@@ -1295,19 +1297,48 @@
           "type": "object",
           "properties": {
             "address": {
+              "description": "Default address template for agents in this project.",
               "anyOf": [
                 {
-                  "description": "Default address template for agents in this project.",
-                  "type": [
-                    "string",
-                    "null"
+                  "description": "MiniJinja text, or `{\"js\": \"...\"}`.",
+                  "anyOf": [
+                    {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "$ref": "#/$defs/EnvReference"
+                        },
+                        {
+                          "$ref": "#/$defs/FileReference"
+                        }
+                      ]
+                    },
+                    {
+                      "description": "JavaScript run in QuickJS with no I/O. The template context is exposed as\nglobal variables; the value of the last statement is the result. Output hooks\nkeep `globalThis` for the whole run; other scripts start from a fresh context.",
+                      "type": "object",
+                      "properties": {
+                        "js": {
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "$ref": "#/$defs/EnvReference"
+                            },
+                            {
+                              "$ref": "#/$defs/FileReference"
+                            }
+                          ]
+                        }
+                      },
+                      "additionalProperties": false
+                    }
                   ]
                 },
                 {
-                  "$ref": "#/$defs/EnvReference"
-                },
-                {
-                  "$ref": "#/$defs/FileReference"
+                  "type": "null"
                 }
               ]
             },
@@ -1485,76 +1516,49 @@
                       "additionalProperties": false
                     },
                     "login": {
-                      "anyOf": [
-                        {
-                          "type": "object",
-                          "properties": {
-                            "password": {
-                              "anyOf": [
-                                {
-                                  "type": "string"
-                                },
-                                {
-                                  "type": "object",
-                                  "properties": {
-                                    "env": {
-                                      "type": "string",
-                                      "pattern": "^[A-Za-z_][A-Za-z0-9_]*$(?![\\s\\S])"
-                                    }
-                                  },
-                                  "additionalProperties": false
-                                },
-                                {
-                                  "type": "object",
-                                  "properties": {
-                                    "file": {
-                                      "type": "string"
-                                    }
-                                  },
-                                  "additionalProperties": false
-                                }
-                              ]
+                      "type": "object",
+                      "properties": {
+                        "password": {
+                          "anyOf": [
+                            {
+                              "type": "string"
                             },
-                            "username": {
-                              "anyOf": [
-                                {
-                                  "type": "string"
-                                },
-                                {
-                                  "$ref": "#/$defs/EnvReference"
-                                },
-                                {
-                                  "$ref": "#/$defs/FileReference"
+                            {
+                              "type": "object",
+                              "properties": {
+                                "env": {
+                                  "type": "string",
+                                  "pattern": "^[A-Za-z_][A-Za-z0-9_]*$(?![\\s\\S])"
                                 }
-                              ]
+                              },
+                              "additionalProperties": false
+                            },
+                            {
+                              "type": "object",
+                              "properties": {
+                                "file": {
+                                  "type": "string"
+                                }
+                              },
+                              "additionalProperties": false
                             }
-                          },
-                          "additionalProperties": false
+                          ]
                         },
-                        {
-                          "type": "object",
-                          "properties": {
-                            "password_env": {
-                              "type": "string",
-                              "pattern": "^[A-Za-z_][A-Za-z0-9_]*$(?![\\s\\S])"
+                        "username": {
+                          "anyOf": [
+                            {
+                              "type": "string"
                             },
-                            "username": {
-                              "anyOf": [
-                                {
-                                  "type": "string"
-                                },
-                                {
-                                  "$ref": "#/$defs/EnvReference"
-                                },
-                                {
-                                  "$ref": "#/$defs/FileReference"
-                                }
-                              ]
+                            {
+                              "$ref": "#/$defs/EnvReference"
+                            },
+                            {
+                              "$ref": "#/$defs/FileReference"
                             }
-                          },
-                          "additionalProperties": false
+                          ]
                         }
-                      ]
+                      },
+                      "additionalProperties": false
                     },
                     "mailbox": {
                       "anyOf": [
@@ -1680,50 +1684,22 @@
                       "additionalProperties": false
                     },
                     "login": {
-                      "anyOf": [
-                        {
+                      "type": [
+                        "object",
+                        "null"
+                      ],
+                      "properties": {
+                        "password": {
                           "anyOf": [
+                            {
+                              "type": "string"
+                            },
                             {
                               "type": "object",
                               "properties": {
-                                "password": {
-                                  "anyOf": [
-                                    {
-                                      "type": "string"
-                                    },
-                                    {
-                                      "type": "object",
-                                      "properties": {
-                                        "env": {
-                                          "type": "string",
-                                          "pattern": "^[A-Za-z_][A-Za-z0-9_]*$(?![\\s\\S])"
-                                        }
-                                      },
-                                      "additionalProperties": false
-                                    },
-                                    {
-                                      "type": "object",
-                                      "properties": {
-                                        "file": {
-                                          "type": "string"
-                                        }
-                                      },
-                                      "additionalProperties": false
-                                    }
-                                  ]
-                                },
-                                "username": {
-                                  "anyOf": [
-                                    {
-                                      "type": "string"
-                                    },
-                                    {
-                                      "$ref": "#/$defs/EnvReference"
-                                    },
-                                    {
-                                      "$ref": "#/$defs/FileReference"
-                                    }
-                                  ]
+                                "env": {
+                                  "type": "string",
+                                  "pattern": "^[A-Za-z_][A-Za-z0-9_]*$(?![\\s\\S])"
                                 }
                               },
                               "additionalProperties": false
@@ -1731,32 +1707,29 @@
                             {
                               "type": "object",
                               "properties": {
-                                "password_env": {
-                                  "type": "string",
-                                  "pattern": "^[A-Za-z_][A-Za-z0-9_]*$(?![\\s\\S])"
-                                },
-                                "username": {
-                                  "anyOf": [
-                                    {
-                                      "type": "string"
-                                    },
-                                    {
-                                      "$ref": "#/$defs/EnvReference"
-                                    },
-                                    {
-                                      "$ref": "#/$defs/FileReference"
-                                    }
-                                  ]
+                                "file": {
+                                  "type": "string"
                                 }
                               },
                               "additionalProperties": false
                             }
                           ]
                         },
-                        {
-                          "type": "null"
+                        "username": {
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "$ref": "#/$defs/EnvReference"
+                            },
+                            {
+                              "$ref": "#/$defs/FileReference"
+                            }
+                          ]
                         }
-                      ]
+                      },
+                      "additionalProperties": false
                     }
                   },
                   "additionalProperties": false
@@ -1903,63 +1876,19 @@
           "const": 1
         }
       },
-      "additionalProperties": false,
-      "$defs": {
-        "Arg": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "object",
-              "properties": {
-                "template": {
-                  "type": "string"
-                }
-              },
-              "additionalProperties": false
-            },
-            {
-              "$ref": "#/$defs/ArgGroup"
-            }
-          ]
-        },
-        "ArgGroup": {
-          "type": "object",
-          "properties": {
-            "args": {
-              "description": "Arguments emitted at this position when the condition is true.",
-              "type": "array",
-              "items": {
-                "$ref": "#/$defs/Arg"
-              }
-            },
-            "when": {
-              "description": "MiniJinja expression that must evaluate to a boolean.",
-              "type": "string"
-            }
-          },
-          "additionalProperties": false
-        }
-      }
+      "additionalProperties": false
     },
     "ProjectMail": {
       "type": "object",
       "properties": {
         "address": {
+          "description": "Default address template for agents in this project.",
           "anyOf": [
             {
-              "description": "Default address template for agents in this project.",
-              "type": [
-                "string",
-                "null"
-              ]
+              "$ref": "#/$defs/Template"
             },
             {
-              "$ref": "#/$defs/EnvReference"
-            },
-            {
-              "$ref": "#/$defs/FileReference"
+              "type": "null"
             }
           ]
         },
@@ -2061,6 +1990,29 @@
         }
       ]
     },
+    "Script": {
+      "description": "JavaScript run in QuickJS with no I/O. The template context is exposed as\nglobal variables; the value of the last statement is the result. Output hooks\nkeep `globalThis` for the whole run; other scripts start from a fresh context.",
+      "type": "object",
+      "properties": {
+        "js": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "$ref": "#/$defs/EnvReference"
+            },
+            {
+              "$ref": "#/$defs/FileReference"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "js"
+      ]
+    },
     "SearchMail": {
       "type": "object",
       "properties": {
@@ -2132,13 +2084,6 @@
     "SendMail": {
       "type": "object",
       "properties": {
-        "agent": {
-          "description": "Single target agent (shorthand for one entry in to).",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
         "bcc": {
           "type": "array",
           "default": [],
@@ -2193,14 +2138,15 @@
         "body"
       ]
     },
-    "SessionIdEvent": {
-      "type": "object",
-      "properties": {
-        "event": {
+    "Sessions": {
+      "description": "How the harness identifies persistent native sessions.",
+      "oneOf": [
+        {
           "anyOf": [
             {
-              "description": "Expected value of the JSON event's `type` field.",
-              "type": "string"
+              "description": "No persistent sessions.",
+              "type": "string",
+              "const": "none"
             },
             {
               "$ref": "#/$defs/EnvReference"
@@ -2210,11 +2156,12 @@
             }
           ]
         },
-        "field": {
+        {
           "anyOf": [
             {
-              "description": "JSON field containing the native session ID.",
-              "type": "string"
+              "description": "Creates and resumes sessions under the ID `agents` supplies.",
+              "type": "string",
+              "const": "supplied"
             },
             {
               "$ref": "#/$defs/EnvReference"
@@ -2224,16 +2171,21 @@
             }
           ]
         },
-        "uuid": {
-          "description": "Require a UUID rather than accepting an arbitrary identifier.",
-          "type": "boolean",
-          "default": false
+        {
+          "anyOf": [
+            {
+              "description": "Assigns its own ID, which an output hook reports for a new session.",
+              "type": "string",
+              "const": "reported"
+            },
+            {
+              "$ref": "#/$defs/EnvReference"
+            },
+            {
+              "$ref": "#/$defs/FileReference"
+            }
+          ]
         }
-      },
-      "additionalProperties": false,
-      "required": [
-        "event",
-        "field"
       ]
     },
     "SetRead": {
@@ -2252,13 +2204,10 @@
         "read"
       ]
     },
-    "SourceLogin": {
-      "type": "object",
-      "properties": {
-        "password": {
-          "$ref": "#/$defs/ValueSource"
-        },
-        "username": {
+    "Template": {
+      "description": "MiniJinja text, or `{\"js\": \"...\"}`.",
+      "anyOf": [
+        {
           "anyOf": [
             {
               "type": "string"
@@ -2270,12 +2219,10 @@
               "$ref": "#/$defs/FileReference"
             }
           ]
+        },
+        {
+          "$ref": "#/$defs/Script"
         }
-      },
-      "additionalProperties": false,
-      "required": [
-        "username",
-        "password"
       ]
     },
     "Transport": {

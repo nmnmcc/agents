@@ -1,7 +1,7 @@
 use super::{
     inbox::unique_header,
     retry,
-    store::Session,
+    store::Folder,
     transport::{self, Submission},
 };
 use crate::{
@@ -126,14 +126,14 @@ pub fn flush(workspace: &Workspace) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn enqueue(store: &mut Session, raw: &[u8], to: &MailAddress) -> Result<()> {
+pub(super) fn enqueue(store: &mut Folder, raw: &[u8], to: &MailAddress) -> Result<()> {
     append(
         store,
         &retry::QueueEntry::new(raw, retry::now()?, &to.to_string()).encode(),
     )
 }
 
-fn append(store: &mut Session, entry: &[u8]) -> Result<()> {
+fn append(store: &mut Folder, entry: &[u8]) -> Result<()> {
     // Every record in the dedicated local outbox is initially queued.
     // Avoid a second write between the durable append and the ready state.
     store.append((!store.is_local()).then_some(READY), entry)
@@ -164,10 +164,9 @@ fn stamp(to: &MailAddress, from: &MailAddress, raw: &[u8]) -> Result<Vec<u8>> {
             "message already contains {name}"
         );
     }
-    let mut stamped = format!(
-        "X-Agents-Envelope-To: {to}\r\nX-Agents-Authenticated-From: {from}\r\nX-Agents-Delivery-ID: {}\r\n",
-        uuid::Uuid::new_v4()
-    ).into_bytes();
+    let mut stamped =
+        format!("X-Agents-Envelope-To: {to}\r\nX-Agents-Authenticated-From: {from}\r\n")
+            .into_bytes();
     stamped.extend_from_slice(raw);
     Ok(stamped)
 }
@@ -187,10 +186,7 @@ fn envelope<'a>(
         .parse(entry.message)
         .context("invalid queued message")?;
     ensure!(
-        matches!(
-            unique_header(&message, "X-Agents-Kind")?,
-            Some("task" | "result")
-        ),
+        matches!(unique_header(&message, "X-Agents-Kind")?, Some("task")),
         "not a worker-generated message"
     );
     let address = |items: Option<&Address<'_>>| -> Result<MailAddress> {
@@ -206,10 +202,7 @@ fn envelope<'a>(
     };
     let from = address(message.from())?;
     routes.route(&from)?;
-    let to = match entry.recipient {
-        Some(to) => to.parse().map_err(anyhow::Error::msg)?,
-        None => address(message.to())?, // Queue entries from older versions.
-    };
+    let to = entry.recipient.parse().map_err(anyhow::Error::msg)?;
     let id = unique_header(&message, "Message-ID")?
         .and_then(message_id)
         .context("invalid queued Message-ID")?;
@@ -218,7 +211,7 @@ fn envelope<'a>(
 
 fn superseded(
     routes: &MailRoutes,
-    store: &mut Session,
+    store: &mut Folder,
     uid: u32,
     id: &str,
     to: &MailAddress,

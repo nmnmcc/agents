@@ -1,7 +1,4 @@
-use crate::{
-    config::values::{ValueSource, read_env},
-    types::EnvName,
-};
+use crate::{config::values::ValueSource, types::EnvName};
 use anyhow::{Context, Result, ensure};
 use lettre::{
     SmtpTransport, Transport, address::Envelope, transport::smtp::authentication::Credentials,
@@ -45,46 +42,15 @@ impl Endpoint {
 }
 
 #[derive(Deserialize, JsonSchema)]
-#[serde(untagged)]
-pub enum Login {
-    Source(SourceLogin),
-    Legacy(LegacyLogin),
-}
-
-#[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct SourceLogin {
+pub struct Login {
     username: String,
     password: ValueSource,
 }
 
-#[derive(Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct LegacyLogin {
-    username: String,
-    password_env: EnvName,
-}
-
 impl Login {
-    fn username(&self) -> &str {
-        match self {
-            Self::Source(login) => &login.username,
-            Self::Legacy(login) => &login.username,
-        }
-    }
-
     pub fn password_env(&self) -> Option<&EnvName> {
-        match self {
-            Self::Source(login) => login.password.env_name(),
-            Self::Legacy(login) => Some(&login.password_env),
-        }
-    }
-
-    fn password(&self, root: &Path) -> Result<String> {
-        match self {
-            Self::Source(login) => login.password.read(root),
-            Self::Legacy(login) => read_env(&login.password_env),
-        }
+        self.password.env_name()
     }
 }
 
@@ -106,10 +72,10 @@ pub struct Outgoing {
 trait Stream: Read + Write + Send {}
 impl<T: Read + Write + Send> Stream for T {}
 
-pub fn connect(config: &Incoming, root: &Path) -> Result<Session> {
+pub fn connect(config: &Incoming, root: &Path) -> Result<Imap> {
     let endpoint = &config.endpoint;
     endpoint.check()?;
-    let password = config.login.password(root)?;
+    let password = config.login.password.read(root)?;
     let stream =
         TcpStream::connect((endpoint.host.as_str(), endpoint.port)).context("connect to IMAP")?;
     let stream: Box<dyn Stream> = match endpoint.security {
@@ -123,10 +89,10 @@ pub fn connect(config: &Incoming, root: &Path) -> Result<Session> {
     let mut client = imap::Client::new(stream);
     client.read_greeting().context("read IMAP greeting")?;
     let session = client
-        .login(config.login.username(), password)
+        .login(&config.login.username, password)
         .map_err(|(error, _)| error)
         .context("IMAP login")?;
-    Ok(Session { session })
+    Ok(Imap { session })
 }
 
 pub enum Submission {
@@ -135,17 +101,17 @@ pub enum Submission {
     Rejected,
 }
 
-pub struct Session {
+pub struct Imap {
     session: imap::Session<Box<dyn Stream>>,
 }
 
-impl Drop for Session {
+impl Drop for Imap {
     fn drop(&mut self) {
         let _ = self.session.logout();
     }
 }
 
-impl Session {
+impl Imap {
     pub fn select(&mut self, name: &str, keywords: &[&str]) -> Result<u32> {
         let mailbox = self
             .session
@@ -259,8 +225,8 @@ pub fn submission(config: &Outgoing, root: &Path) -> Result<SmtpTransport> {
     .port(endpoint.port);
     if let Some(login) = &config.login {
         builder = builder.credentials(Credentials::new(
-            login.username().into(),
-            login.password(root)?,
+            login.username.clone(),
+            login.password.read(root)?,
         ));
     }
     Ok(builder.build())
