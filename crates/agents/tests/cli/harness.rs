@@ -441,3 +441,87 @@ fn hooks_surround_the_run_and_filter_its_output() {
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("hooks.stdout"));
 }
+
+#[test]
+fn mail_runs_once_per_message_until_retried_and_time_out() {
+    let mut fixture = Fixture::new();
+    let program = fixture.root.join("counted");
+    let runs = fixture.root.join("runs.log");
+    let hang = fixture.root.join("hang");
+    fs::write(
+        &program,
+        format!(
+            "#!/bin/sh\necho run >> '{}'\nif test -e '{}'; then sh -c 'sleep 30' & wait; fi\n",
+            runs.display(),
+            hang.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&program, fs::Permissions::from_mode(0o700)).unwrap();
+    fixture.project["harnesses"]["review"] = json!({
+        "program": program,
+        "args": [],
+        "capabilities": {"mcp": ["stdio"], "skills": true}
+    });
+    fixture.project["agents"]["reviewer"]["timeout"] = json!(1);
+    fixture.save();
+    let count = || fs::read_to_string(&runs).unwrap().lines().count();
+    let once = || fixture.command().arg("--once").output().unwrap();
+    let list = || -> Vec<Value> {
+        let output = fixture
+            .command()
+            .args(["mail", "list", "--agent", "reviewer"])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let page: Value = serde_json::from_slice(&output.stdout).unwrap();
+        page["messages"].as_array().unwrap().clone()
+    };
+
+    let output = fixture.handle_mail("reviewer", "One.");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(count(), 1);
+    // The agent left the message unread, but a run already started for it.
+    assert!(once().status.success());
+    assert_eq!(count(), 1);
+    let message = &list()[0];
+    assert_eq!(
+        (
+            &message["unread"],
+            &message["dispatched"],
+            &message["failed"]
+        ),
+        (&json!(true), &json!(true), &json!(false))
+    );
+
+    let mail = &message["mail"];
+    let retry = fixture
+        .command()
+        .args(["mail", "retry", "--agent", "reviewer"])
+        .arg(mail["uid"].to_string())
+        .args(["--uid-validity", &mail["uid_validity"].to_string()])
+        .output()
+        .unwrap();
+    assert!(
+        retry.status.success(),
+        "{}",
+        String::from_utf8_lossy(&retry.stderr)
+    );
+    assert!(once().status.success());
+    assert_eq!(count(), 2);
+
+    fs::write(&hang, "").unwrap();
+    let started = std::time::Instant::now();
+    let output = fixture.handle_mail("reviewer", "Two.");
+    assert!(started.elapsed() < std::time::Duration::from_secs(20));
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("harness timed out after 1s"));
+    let messages = list();
+    assert_eq!(messages[0]["failed"], true);
+    assert_eq!(messages[1]["failed"], false);
+    assert_eq!(count(), 3);
+}

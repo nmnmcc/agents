@@ -1,19 +1,22 @@
 use super::{
     AddressPolicy,
     request::{GetAttachment, ListMail, MailRef, SearchMail},
-    store::Folder,
+    store::{Folder, Query},
 };
 use crate::types::MailAddress;
 use anyhow::{Context, Result, ensure};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use mail_parser::{Address, HeaderValue, Message, MessageParser, MimeHeaders};
 use serde_json::{Value, json};
-use std::collections::BTreeSet;
 
 pub(super) const LOCAL_TO: &str = "X-Agents-Local-To";
 pub(super) const LOCAL_FROM: &str = "X-Agents-Local-From";
 pub(super) const UNSIGNED: &str = "X-Agents-Local-Unsigned";
 pub(super) const INGESTED: &str = "X-Agents-Local-Imported";
+/// The daemon started an agent run for this message.
+pub(super) const DISPATCHED: &str = "AgentsDispatched";
+/// The agent run for this message failed or timed out.
+pub(super) const FAILED: &str = "AgentsFailed";
 
 pub struct Inbox<'a> {
     folder: Folder,
@@ -80,39 +83,54 @@ impl<'a> Inbox<'a> {
             && routing_sender(message).is_ok_and(|sender| self.incoming.allows(&sender, true))
     }
 
-    fn candidates(&mut self, extra: &str, unread: bool, before: Option<u32>) -> Result<Vec<u32>> {
-        let address = quoted(&self.address.to_string())?;
-        let query = format!(
-            "UNDELETED {} HEADER {LOCAL_TO} {address} {extra}",
-            if unread { "UNSEEN" } else { "" },
-        );
-        let mut uids =
-            self.folder
-                .search(query.trim(), &[], if unread { &["\\Seen"] } else { &[] })?;
+    /// Newest first.
+    fn candidates(&mut self, query: Query<'_>, before: Option<u32>) -> Result<Vec<u32>> {
+        let mut uids = self.folder.search(&Query {
+            header: Some((LOCAL_TO, &self.address.to_string())),
+            ..query
+        })?;
         uids.retain(|uid| before.is_none_or(|before| *uid < before));
         uids.reverse();
         Ok(uids)
     }
 
+    fn unread(unread: bool) -> Query<'static> {
+        Query {
+            unseen: unread,
+            ..Query::default()
+        }
+    }
+
     pub fn list(&mut self, request: ListMail) -> Result<Value> {
-        let uids = self.candidates("", request.unread_only, request.before_uid)?;
+        let uids = self.candidates(Self::unread(request.unread_only), request.before_uid)?;
         self.page(uids, request.limit, None)
     }
 
-    pub fn unread_refs(&mut self) -> Result<BTreeSet<MailRef>> {
-        let mut unread = BTreeSet::new();
-        for uid in self.candidates("", true, None)? {
+    /// Unread visible mail that no agent run was started for, oldest first.
+    pub fn pending_runs(&mut self) -> Result<Vec<MailRef>> {
+        let mut pending = Vec::new();
+        let query = Query {
+            unseen: true,
+            excluded: &[DISPATCHED],
+            ..Query::default()
+        };
+        for uid in self.candidates(query, None)?.into_iter().rev() {
             if let Some(raw) = self.folder.message(uid)?
                 && let Some(message) = MessageParser::default().parse(&raw)
                 && self.visible(&message)
             {
-                unread.insert(MailRef {
+                pending.push(MailRef {
                     uid,
                     uid_validity: self.validity,
                 });
             }
         }
-        Ok(unread)
+        Ok(pending)
+    }
+
+    /// Records that a run started, finished, or should be repeated.
+    pub fn mark(&mut self, id: MailRef, keyword: &str, add: bool) -> Result<()> {
+        self.inspect(id, |this, _| this.folder.keyword(id.uid, keyword, add))
     }
 
     pub fn event(&mut self, mail: MailRef) -> Result<MailEvent> {
@@ -132,20 +150,9 @@ impl<'a> Inbox<'a> {
 
     pub fn search(&mut self, request: SearchMail) -> Result<Value> {
         ensure!(!request.query.trim().is_empty(), "search query is empty");
-        let query = quoted(&request.query)?;
-        if request.query.is_ascii() && !self.folder.is_local() {
-            let uids = self.candidates(
-                &format!("TEXT {query}"),
-                request.unread_only,
-                request.before_uid,
-            )?;
-            self.page(uids, request.limit, None)
-        } else {
-            // IMAP4rev1 peers need not accept UTF-8 in quoted search strings.
-            // Search decoded message headers and body in that case.
-            let uids = self.candidates("", request.unread_only, request.before_uid)?;
-            self.page(uids, request.limit, Some(&request.query.to_lowercase()))
-        }
+        // The inbox is local: search decoded message headers and bodies.
+        let uids = self.candidates(Self::unread(request.unread_only), request.before_uid)?;
+        self.page(uids, request.limit, Some(&request.query.to_lowercase()))
     }
 
     fn page(
@@ -224,13 +231,16 @@ impl<'a> Inbox<'a> {
             .take(200)
             .collect::<String>();
         let flags = self.folder.flags(uid)?;
+        let has = |name: &str| flags.iter().any(|flag| flag.eq_ignore_ascii_case(name));
         Ok(json!({
             "mail": MailRef { uid, uid_validity: self.validity },
             "from": unique_header(message, LOCAL_FROM).ok().flatten(),
             "authenticated": !is_unsigned(message),
             "subject": message.subject(),
             "date": message.date().map(|date| date.to_rfc3339()),
-            "unread": !flags.iter().any(|flag| flag.eq_ignore_ascii_case("\\Seen")),
+            "unread": !has("\\Seen"),
+            "dispatched": has(DISPATCHED),
+            "failed": has(FAILED),
             "summary": summary
         }))
     }
@@ -331,12 +341,8 @@ impl<'a> Inbox<'a> {
             let Some(root) = thread_root(message) else {
                 return Ok(json!({"messages":[this.full(id.uid, message)?]}));
             };
-            let term = quoted(root)?;
-            let query = format!(
-                "OR OR HEADER Message-ID {term} HEADER References {term} HEADER In-Reply-To {term}"
-            );
             let mut found = Vec::new();
-            for uid in this.candidates(&query, false, None)?.into_iter().rev() {
+            for uid in this.candidates(Query::default(), None)?.into_iter().rev() {
                 let Some(raw) = this.folder.message(uid)? else {
                     continue;
                 };
@@ -425,12 +431,4 @@ fn text<'a>(message: &'a Message<'a>) -> String {
         .filter_map(|(index, _)| message.body_text(index))
         .collect::<Vec<_>>()
         .join("\n\n")
-}
-
-fn quoted(text: &str) -> Result<String> {
-    ensure!(!text.contains(['\r', '\n', '\0']), "invalid search text");
-    Ok(format!(
-        "\"{}\"",
-        text.replace('\\', "\\\\").replace('"', "\\\"")
-    ))
 }

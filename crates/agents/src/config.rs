@@ -1,4 +1,5 @@
 mod layers;
+mod live;
 mod routing;
 pub mod schema;
 pub mod values;
@@ -9,6 +10,7 @@ use crate::{
 };
 use anyhow::{Context, Result, bail, ensure};
 use ignore::gitignore::GitignoreBuilder;
+pub use live::{Live, Snapshot};
 use routing::{AgentMail, ProjectMail};
 pub use routing::{AgentMailbox, MailRoutes};
 use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
@@ -17,7 +19,8 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     env, fs, io,
     path::{Path, PathBuf},
-    rc::Rc,
+    sync::Arc,
+    time::Duration,
 };
 use values::References;
 
@@ -61,6 +64,9 @@ struct InlineAgent {
     #[serde(default, deserialize_with = "optional_unique_ids")]
     skills: Option<BTreeSet<Id>>,
     mail: Option<AgentMail>,
+    /// Seconds before a mail-triggered run and its child processes are killed.
+    #[schemars(range(min = 1))]
+    timeout: Option<u64>,
 }
 
 fn optional_unique_ids<'de, D: serde::Deserializer<'de>>(
@@ -218,22 +224,25 @@ pub struct Project {
     pub project_instructions: Option<String>,
     pub skills: BTreeMap<Id, PathBuf>,
     pub mcp: BTreeMap<Id, Mcp>,
-    pub references: Rc<References>,
+    pub references: Arc<References>,
+    /// Limit for mail-triggered runs; unset means the default.
+    pub timeout: Option<Duration>,
 }
 
 pub struct Workspace {
-    selected: Rc<LocatedProject>,
+    selected: Arc<LocatedProject>,
 }
 
 pub struct LocatedProject {
     pub root: PathBuf,
     config: ProjectConfig,
-    references: Rc<References>,
+    references: Arc<References>,
+    sources: layers::Sources,
 }
 
 impl LocatedProject {
     fn find(root: &Path) -> Result<Option<Self>> {
-        let Some((config, references)) = layers::load::<ProjectConfig>(root)? else {
+        let Some((config, references, sources)) = layers::load::<ProjectConfig>(root)? else {
             return Ok(None);
         };
         ensure!(
@@ -247,10 +256,17 @@ impl LocatedProject {
             .transport
             .check()
             .context("invalid mail transport configuration")?;
+        for (id, agent) in &config.agents {
+            ensure!(
+                agent.timeout != Some(0),
+                "agents.{id}.timeout must be positive"
+            );
+        }
         Ok(Some(Self {
             root: root.to_owned(),
             config,
-            references: Rc::new(references),
+            references: Arc::new(references),
+            sources,
         }))
     }
 }
@@ -264,7 +280,7 @@ impl Workspace {
         let start = directory.map_or_else(env::current_dir, fs::canonicalize)?;
         ensure!(start.is_dir(), "{} is not a directory", start.display());
         Ok(Self {
-            selected: Rc::new(discover(&start)?),
+            selected: Arc::new(discover(&start)?),
         })
     }
 
@@ -343,7 +359,8 @@ impl Workspace {
             project_instructions,
             skills,
             mcp,
-            references: Rc::clone(&located.references),
+            references: Arc::clone(&located.references),
+            timeout: definition.timeout.map(Duration::from_secs),
         })
     }
 }

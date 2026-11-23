@@ -5,7 +5,11 @@ use super::{
 use anyhow::{Context, Result, ensure};
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value};
-use std::{fs, io, path::Path};
+use sha2::{Digest, Sha256};
+use std::{
+    fs, io,
+    path::{Path, PathBuf},
+};
 
 const FORMATS: [&str; 5] = ["json", "json5", "jsonc", "yaml", "yml"];
 const JSONC: jsonc_parser::ParseOptions = jsonc_parser::ParseOptions {
@@ -21,7 +25,18 @@ const JSONC: jsonc_parser::ParseOptions = jsonc_parser::ParseOptions {
     allow_extended_string_escapes: false,
 };
 
-pub fn load<T: DeserializeOwned>(root: &Path) -> Result<Option<(T, References)>> {
+/// Files whose metadata identifies a loaded configuration, and a digest of its merged value.
+pub struct Sources {
+    pub paths: Vec<PathBuf>,
+    pub digest: [u8; 32],
+}
+
+pub fn load<T: DeserializeOwned>(root: &Path) -> Result<Option<(T, References, Sources)>> {
+    let mut paths: Vec<_> = FORMATS
+        .iter()
+        .map(|format| root.join(format!(".agents.{format}")))
+        .chain([root.join(".agents.d")])
+        .collect();
     let mut files = Vec::new();
     for format in FORMATS {
         let name = format!(".agents.{format}");
@@ -56,6 +71,7 @@ pub fn load<T: DeserializeOwned>(root: &Path) -> Result<Option<(T, References)>>
     if files.is_empty() {
         return Ok(None);
     }
+    paths.extend(files.iter().map(|(path, _)| path.clone()));
 
     let mut merged = Map::new();
     for (file, format) in &files {
@@ -76,6 +92,8 @@ pub fn load<T: DeserializeOwned>(root: &Path) -> Result<Option<(T, References)>>
     let mut references = References::default();
     let mut config = Value::Object(merged);
     references.expand(root, &mut config)?;
+    paths.extend(references.files.iter().cloned());
+    let digest = Sha256::digest(serde_json::to_vec(&config)?).into();
     let config = serde_json::from_value(config)
         .map_err(|error| {
             if references.used {
@@ -94,7 +112,7 @@ pub fn load<T: DeserializeOwned>(root: &Path) -> Result<Option<(T, References)>>
                     .join(", ")
             )
         })?;
-    Ok(Some((config, references)))
+    Ok(Some((config, references, Sources { paths, digest })))
 }
 
 fn apply_defaults(config: &mut Map<String, Value>) -> Result<()> {

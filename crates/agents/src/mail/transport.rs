@@ -9,9 +9,10 @@ use lettre::{
 use schemars::JsonSchema;
 use serde::Deserialize;
 use std::{
-    io::{Read, Write},
+    io::{self, Read, Write},
     net::{IpAddr, TcpStream},
     path::Path,
+    time::Duration,
 };
 
 #[derive(Default, Deserialize, JsonSchema)]
@@ -65,6 +66,15 @@ pub struct Incoming {
     pub endpoint: Endpoint,
     pub login: Login,
     pub mailbox: String,
+    /// Seconds between checks for new mail when the server lacks IDLE, and
+    /// the longest single IDLE wait otherwise.
+    #[serde(default = "default_poll_interval")]
+    #[schemars(range(min = 1))]
+    pub poll_interval: u64,
+}
+
+fn default_poll_interval() -> u64 {
+    60
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -77,8 +87,45 @@ pub struct Outgoing {
     pub from: Option<MailAddress>,
 }
 
-trait Stream: Read + Write + Send {}
-impl<T: Read + Write + Send> Stream for T {}
+pub enum Connection {
+    Plain(TcpStream),
+    Tls(Box<native_tls::TlsStream<TcpStream>>),
+}
+
+impl Read for Connection {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        match self {
+            Self::Plain(stream) => stream.read(buffer),
+            Self::Tls(stream) => stream.read(buffer),
+        }
+    }
+}
+
+impl Write for Connection {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        match self {
+            Self::Plain(stream) => stream.write(buffer),
+            Self::Tls(stream) => stream.write(buffer),
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        match self {
+            Self::Plain(stream) => stream.flush(),
+            Self::Tls(stream) => stream.flush(),
+        }
+    }
+}
+
+impl imap::extensions::idle::SetReadTimeout for Connection {
+    fn set_read_timeout(&mut self, timeout: Option<Duration>) -> imap::Result<()> {
+        match self {
+            Self::Plain(stream) => stream.set_read_timeout(timeout)?,
+            Self::Tls(stream) => stream.get_ref().set_read_timeout(timeout)?,
+        }
+        Ok(())
+    }
+}
 
 pub fn connect(config: &Incoming, root: &Path) -> Result<Imap> {
     let endpoint = &config.endpoint;
@@ -90,13 +137,13 @@ pub fn connect(config: &Incoming, root: &Path) -> Result<Imap> {
     let password = config.login.password.read(root)?;
     let stream =
         TcpStream::connect((endpoint.host.as_str(), endpoint.port)).context("connect to IMAP")?;
-    let stream: Box<dyn Stream> = match endpoint.security {
-        Security::Loopback => Box::new(stream),
-        Security::Tls => Box::new(
+    let stream = match endpoint.security {
+        Security::Loopback => Connection::Plain(stream),
+        Security::Tls => Connection::Tls(Box::new(
             native_tls::TlsConnector::new()?
                 .connect(&endpoint.host, stream)
                 .context("establish IMAP TLS")?,
-        ),
+        )),
         Security::Starttls => anyhow::bail!("IMAP requires implicit TLS, not STARTTLS"),
     };
     let mut client = imap::Client::new(stream);
@@ -115,7 +162,7 @@ pub enum Submission {
 }
 
 pub struct Imap {
-    session: imap::Session<Box<dyn Stream>>,
+    session: imap::Session<Connection>,
 }
 
 impl Drop for Imap {
@@ -187,16 +234,52 @@ impl Imap {
         Ok(entry.flags().iter().map(ToString::to_string).collect())
     }
 
-    pub fn set(&mut self, uid: u32, flag: &str) -> Result<()> {
+    pub fn keyword(&mut self, uid: u32, flag: &str, add: bool) -> Result<()> {
+        let operation = if add { '+' } else { '-' };
         self.session
-            .uid_store(uid.to_string(), format!("+FLAGS.SILENT ({flag})"))
-            .with_context(|| format!("set IMAP flag {flag} on UID {uid}"))?;
+            .uid_store(uid.to_string(), format!("{operation}FLAGS.SILENT ({flag})"))
+            .with_context(|| format!("update IMAP flag {flag} on UID {uid}"))?;
         ensure!(
             self.flags(uid)?
                 .iter()
-                .any(|value| value.eq_ignore_ascii_case(flag)),
+                .any(|value| value.eq_ignore_ascii_case(flag))
+                == add,
             "IMAP did not persist {flag} for UID {uid}"
         );
+        Ok(())
+    }
+
+    pub fn expunge(&mut self, uids: &[u32]) -> Result<()> {
+        let set = uids
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        self.session
+            .uid_store(&set, "+FLAGS.SILENT (\\Deleted)")
+            .context("mark IMAP messages deleted")?;
+        self.session
+            .uid_expunge(&set)
+            .context("expunge IMAP messages")?;
+        Ok(())
+    }
+
+    pub fn supports_idle(&mut self) -> Result<bool> {
+        Ok(self
+            .session
+            .capabilities()
+            .context("IMAP CAPABILITY")?
+            .has_str("IDLE"))
+    }
+
+    /// Waits until the selected mailbox changes or the timeout passes.
+    pub fn idle(&mut self, timeout: Duration) -> Result<()> {
+        self.session
+            .idle()
+            .timeout(timeout)
+            .keepalive(false)
+            .wait_while(|_| false)
+            .context("IMAP IDLE")?;
         Ok(())
     }
 

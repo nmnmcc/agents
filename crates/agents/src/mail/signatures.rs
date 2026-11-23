@@ -1,9 +1,10 @@
-use super::{Reply, compose, outbox::message_id};
+use super::retry;
 use crate::types::MailAddress;
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use mail_parser::{ContentType, MessageParser, MimeHeaders, PartType};
 use schemars::JsonSchema;
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     fs,
@@ -13,7 +14,7 @@ use std::{
 
 pub(super) const LIMIT: usize = 8 * 1024 * 1024;
 
-#[derive(Default, Deserialize, JsonSchema)]
+#[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Signatures {
     /// Public keys exported with `gpg --export` (a binary keyring).
@@ -24,6 +25,22 @@ pub(super) struct Signatures {
     /// From address as a fallback.
     #[serde(default)]
     signing: BTreeMap<MailAddress, Signing>,
+    /// Seconds after signing that mail is still accepted. Older mail is rejected,
+    /// which bounds how long receipts are kept to detect replays.
+    #[serde(default = "max_age_default")]
+    #[schemars(range(min = 1))]
+    max_age: u64,
+}
+
+impl Default for Signatures {
+    fn default() -> Self {
+        Self {
+            openpgp_keyring: None,
+            trusted: Vec::new(),
+            signing: BTreeMap::new(),
+            max_age: max_age_default(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Deserialize, JsonSchema)]
@@ -56,11 +73,35 @@ enum Signing {
     },
 }
 
+const fn max_age_default() -> u64 {
+    7 * 24 * 60 * 60
+}
+
+/// Clock skew tolerated for signatures from the future.
+const SKEW: u64 = 300;
+
+/// Headers copied into the signed entity and preferred over the outer headers.
+pub(super) const PROTECTED: &[&str] = &[
+    "From",
+    "Reply-To",
+    "To",
+    "Cc",
+    "Subject",
+    "Date",
+    "Message-ID",
+    "In-Reply-To",
+    "References",
+];
+
+/// A message whose signature is valid and made by a pinned signer.
 pub(super) struct Verified {
-    pub sender: MailAddress,
-    pub recipient: MailAddress,
-    pub id: String,
-    pub message: Vec<u8>,
+    pub signer: MailAddress,
+    /// The signed MIME entity, including its own (possibly protected) headers.
+    pub entity: Vec<u8>,
+    /// Unix time the signature was made.
+    pub signed_at: u64,
+    /// Identifies this signature, independent of any unsigned outer headers.
+    pub receipt: [u8; 32],
 }
 
 impl Signatures {
@@ -101,35 +142,33 @@ impl Signatures {
                 );
             }
         }
+        ensure!(self.max_age > 0, "signatures.max_age must be positive");
         Ok(())
     }
 
-    pub fn verify(&self, root: &Path, raw: &[u8]) -> Result<Option<Verified>> {
-        if raw.len() > LIMIT || self.trusted.is_empty() {
-            return Ok(None);
-        }
-        let Some(message) = MessageParser::default().parse(raw) else {
-            return Ok(None);
-        };
-        let Some(part) = message.parts.first() else {
-            return Ok(None);
-        };
+    /// Verifies a standard OpenPGP/MIME or S/MIME signature by a pinned signer.
+    /// Returns why a message is not accepted.
+    pub fn verify(&self, root: &Path, raw: &[u8]) -> Result<Verified> {
+        ensure!(raw.len() <= LIMIT, "mail exceeds size limit");
+        let message = MessageParser::default()
+            .parse(raw)
+            .context("invalid RFC 5322 mail")?;
+        let part = message.parts.first().context("empty mail")?;
         // Reject ambiguous MIME declarations instead of letting different verifiers pick one.
-        if part
-            .headers
-            .iter()
-            .filter(|header| header.name.as_str().eq_ignore_ascii_case("Content-Type"))
-            .count()
-            > 1
-        {
-            return Ok(None);
-        }
+        ensure!(
+            part.headers
+                .iter()
+                .filter(|header| header.name.as_str().eq_ignore_ascii_case("Content-Type"))
+                .count()
+                <= 1,
+            "duplicate Content-Type header"
+        );
         let mime = part.content_type();
         let is = |kind, subtype| mime.is_some_and(|m| content_type(m, kind, subtype));
         let protocol = mime.and_then(|m| m.attribute("protocol"));
         let uses = |expected: &str| protocol.is_some_and(|v| v.eq_ignore_ascii_case(expected));
         let signed = is("multipart", "signed");
-        let recovered = if is("application", "pkcs7-mime")
+        let verified = if is("application", "pkcs7-mime")
             || is("application", "x-pkcs7-mime")
             || (signed
                 && (uses("application/pkcs7-signature") || uses("application/x-pkcs7-signature")))
@@ -137,147 +176,92 @@ impl Signatures {
             self.verify_smime(raw)?
         } else if signed && uses("application/pgp-signature") {
             let PartType::Multipart(children) = &part.body else {
-                return Ok(None);
+                bail!("malformed multipart/signed mail");
             };
             let [entity, signature] = children.as_slice() else {
-                return Ok(None);
+                bail!("multipart/signed mail must have two parts");
             };
             let (Some(entity), Some(signature)) = (
                 message.parts.get(*entity as usize),
                 message.parts.get(*signature as usize),
             ) else {
-                return Ok(None);
+                bail!("malformed multipart/signed mail");
             };
-            if !signature
-                .content_type()
-                .is_some_and(|m| content_type(m, "application", "pgp-signature"))
-            {
-                return Ok(None);
-            }
-            let Some(entity) =
-                raw.get(entity.raw_header_offset() as usize..entity.raw_end_offset() as usize)
-            else {
-                return Ok(None);
-            };
-            self.verify_pgp(root, &crlf(entity), Some(signature.contents()))?
-        } else if let PartType::Text(text) = &part.body
-            && text.starts_with("-----BEGIN PGP SIGNED MESSAGE-----")
-        {
-            if !clear_signed(text) {
-                return Ok(None);
-            }
-            self.verify_pgp(root, text.as_bytes(), None)?
+            ensure!(
+                signature.content_type().is_some_and(|m| content_type(
+                    m,
+                    "application",
+                    "pgp-signature"
+                )),
+                "second multipart/signed part is not an OpenPGP signature"
+            );
+            let entity = raw
+                .get(entity.raw_header_offset() as usize..entity.raw_end_offset() as usize)
+                .context("malformed multipart/signed mail")?;
+            self.verify_pgp(root, &crlf(entity), signature.contents())?
         } else {
-            None
+            bail!("mail is not signed with OpenPGP/MIME or S/MIME");
         };
-        let Some((sender, body)) = recovered else {
-            return Ok(None);
-        };
-        let Some(task) = Task::parse(&body) else {
-            return Ok(None);
-        };
-        let recipient = task.recipient;
-        let reply = task.parent.map(|parent| Reply {
-            sender: sender.clone(),
-            to: Vec::new(),
-            cc: Vec::new(),
-            subject: String::new(),
-            parent: format!("<{parent}>"),
-            references: task.references,
-        });
-        let message = compose(
-            &sender,
-            std::slice::from_ref(&recipient),
-            &[],
-            &recipient,
-            &[],
-            &task.subject,
-            task.body,
-            reply.as_ref(),
-            &task.id,
-        )?;
-        Ok(Some(Verified {
-            sender,
-            recipient,
-            id: task.id,
-            message,
-        }))
+        let now = retry::now()?;
+        ensure!(
+            verified.signed_at.saturating_add(self.max_age) >= now,
+            "signature is older than signatures.max_age"
+        );
+        ensure!(
+            verified.signed_at <= now.saturating_add(SKEW),
+            "signature is from the future"
+        );
+        Ok(verified)
     }
 
-    fn identity(&self, method: Method, fingerprint: &str) -> Option<MailAddress> {
+    /// Seconds a signature remains acceptable, and so must be remembered to reject replays.
+    pub fn max_age(&self) -> u64 {
+        self.max_age
+    }
+
+    fn identity(&self, method: Method, fingerprint: &str) -> Result<MailAddress> {
         let fingerprint = normalize(fingerprint);
         self.trusted
             .iter()
             .find(|entry| entry.method == method && normalize(&entry.fingerprint) == fingerprint)
             .map(|entry| entry.address.clone())
+            .context("signer is not trusted")
     }
 
-    fn verify_pgp(
-        &self,
-        root: &Path,
-        data: &[u8],
-        detached: Option<&[u8]>,
-    ) -> Result<Option<(MailAddress, String)>> {
-        let Some(keyring) = &self.openpgp_keyring else {
-            return Ok(None);
-        };
+    fn verify_pgp(&self, root: &Path, entity: &[u8], signature: &[u8]) -> Result<Verified> {
+        let keyring = self
+            .openpgp_keyring
+            .as_ref()
+            .context("no OpenPGP keyring is configured")?;
         let keyring =
             fs::canonicalize(root.join(keyring)).context("open OpenPGP public keyring")?;
         let dir = tempfile::tempdir()?;
         let input = dir.path().join("input");
-        let signature = dir.path().join("signature");
-        let plaintext = dir.path().join("verified");
-        fs::write(&input, data)?;
-        let mut command = gpg();
-        command
+        let detached = dir.path().join("signature");
+        fs::write(&input, entity)?;
+        fs::write(&detached, signature)?;
+        let result = run(gpg()
             .arg("--homedir")
             .arg(dir.path())
             .args(["--lock-never", "--no-default-keyring", "--keyring"])
             .arg(keyring)
-            .args(["--status-fd", "1"]);
-        if let Some(bytes) = detached {
-            fs::write(&signature, bytes)?;
-            command.args(["--verify"]).arg(signature);
-        } else {
-            command
-                .arg("--max-output")
-                .arg(LIMIT.to_string())
-                .args(["--decrypt", "--output"])
-                .arg(&plaintext);
-        }
-        let result = run(command.arg(input))?;
-        if !result.status.success() {
-            return Ok(None);
-        }
+            .args(["--status-fd", "1", "--verify"])
+            .arg(detached)
+            .arg(input))?;
+        ensure!(result.status.success(), "invalid OpenPGP signature");
         let status = String::from_utf8_lossy(&result.stdout);
-        let Some(fingerprint) = pgp_fingerprint(&status) else {
-            return Ok(None);
-        };
-        let Some(sender) = self.identity(Method::Openpgp, fingerprint) else {
-            return Ok(None);
-        };
-        let body = if detached.is_some() {
-            mime_body(data)
-        } else {
-            String::from_utf8(fs::read(plaintext)?).ok().map(|text| {
-                // OpenPGP cleartext signatures don't cover trailing spaces or tabs.
-                text.lines()
-                    .map(|line| line.trim_end_matches([' ', '\t']))
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            })
-        };
-        Ok(body.map(|body| (sender, body)))
+        let (fingerprint, signed_at) =
+            pgp_signature(&status).context("invalid OpenPGP signature")?;
+        let signer = self.identity(Method::Openpgp, fingerprint)?;
+        Ok(Verified {
+            receipt: receipt(fingerprint, signed_at, entity),
+            signer,
+            entity: entity.to_vec(),
+            signed_at,
+        })
     }
 
-    fn verify_smime(&self, raw: &[u8]) -> Result<Option<(MailAddress, String)>> {
-        if !self
-            .trusted
-            .iter()
-            .any(|entry| matches!(entry.method, Method::Smime))
-        {
-            return Ok(None);
-        }
+    fn verify_smime(&self, raw: &[u8]) -> Result<Verified> {
         let dir = tempfile::tempdir()?;
         let input = dir.path().join("input");
         let cert = dir.path().join("signer.pem");
@@ -286,46 +270,70 @@ impl Signatures {
         // -noverify skips certificate chain validation, NOT the CMS content/signature checks.
         let verified = run(openssl()
             .args(["cms", "-verify", "-inform", "SMIME", "-noverify", "-in"])
-            .arg(input)
+            .arg(&input)
             .arg("-signer")
             .arg(&cert))?;
-        if !verified.status.success() {
-            return Ok(None);
-        }
+        ensure!(verified.status.success(), "invalid S/MIME signature");
         let cert_bytes = fs::read(&cert)?;
-        if cert_bytes
-            .split(|&byte| byte == b'\n')
-            .filter(|line| {
-                line.strip_suffix(b"\r").unwrap_or(line) == b"-----BEGIN CERTIFICATE-----"
-            })
-            .count()
-            != 1
-        {
-            return Ok(None);
-        }
+        ensure!(
+            cert_bytes
+                .split(|&byte| byte == b'\n')
+                .filter(|line| {
+                    line.strip_suffix(b"\r").unwrap_or(line) == b"-----BEGIN CERTIFICATE-----"
+                })
+                .count()
+                == 1,
+            "S/MIME mail must have exactly one signer"
+        );
         let details = run(openssl()
-            .args(["x509", "-noout", "-sha256", "-fingerprint", "-in"])
-            .arg(cert))?;
-        if !details.status.success() {
-            return Ok(None);
-        }
+            .args([
+                "x509",
+                "-noout",
+                "-sha256",
+                "-fingerprint",
+                "-checkend",
+                "0",
+                "-in",
+            ])
+            .arg(&cert))?;
+        ensure!(details.status.success(), "S/MIME certificate has expired");
         let details = String::from_utf8_lossy(&details.stdout);
-        let Some((_, fingerprint)) = details.trim().split_once('=') else {
-            return Ok(None);
+        let fingerprint = details
+            .lines()
+            .find_map(|line| line.split_once('=').map(|(_, value)| value.trim()))
+            .context("read S/MIME certificate fingerprint")?;
+        let signer = self.identity(Method::Smime, fingerprint)?;
+        let printed = run(openssl()
+            .args([
+                "cms", "-cmsout", "-print", "-noout", "-inform", "SMIME", "-in",
+            ])
+            .arg(&input))?;
+        ensure!(printed.status.success(), "read S/MIME signed attributes");
+        let entity = crlf(&verified.stdout);
+        let signed_at = match smime_signing_time(&String::from_utf8_lossy(&printed.stdout)) {
+            Some(time) => time,
+            // Without a signingTime attribute, rely on a protected Date header.
+            None => MessageParser::default()
+                .parse_headers(&entity)
+                .and_then(|headers| headers.date().map(|date| date.to_timestamp()))
+                .and_then(|time| u64::try_from(time).ok())
+                .context("S/MIME signature has no signing time or protected Date")?,
         };
-        let Some(sender) = self.identity(Method::Smime, fingerprint) else {
-            return Ok(None);
-        };
-        Ok(mime_body(&verified.stdout).map(|body| (sender, body)))
+        Ok(Verified {
+            receipt: receipt(fingerprint, signed_at, &entity),
+            signer,
+            entity,
+            signed_at,
+        })
     }
 
+    /// Signs a queued message as standard multipart/signed mail. The signed entity carries
+    /// the protected headers; the outer headers are sent from the shared SMTP address.
     pub fn sign(
         &self,
         root: &Path,
         agent: &MailAddress,
         from: &MailAddress,
-        to: &MailAddress,
-        id: &str,
         raw: &[u8],
     ) -> Result<Vec<u8>> {
         let identity = |address: &MailAddress| {
@@ -334,47 +342,58 @@ impl Signatures {
                 .find(|(key, _)| key.matches(address))
                 .map(|(_, signing)| signing)
         };
-        let signing = identity(agent)
-            .or_else(|| identity(from))
-            .with_context(|| {
-                format!("no SMTP signing identity configured for {agent} or {from}")
-            })?;
+        let (signer, signing) = match identity(agent) {
+            Some(signing) => (agent, signing),
+            None => (
+                from,
+                identity(from).with_context(|| {
+                    format!("no SMTP signing identity configured for {agent} or {from}")
+                })?,
+            ),
+        };
         let message = MessageParser::default()
             .parse(raw)
             .context("invalid queued mail")?;
-        let body = message.body_text(0).context("missing queued mail body")?;
-        let mut protected = format!(
-            "Agent-To: {to}\nTask-ID: {id}\nSubject: {}\n",
-            message
-                .subject()
-                .unwrap_or("")
-                .replace(['\r', '\n', '\0'], " "),
-        );
-        for name in ["In-Reply-To", "References"] {
-            let value = match name {
-                "In-Reply-To" => message.in_reply_to(),
-                _ => message.references(),
+        let part = message.parts.first().context("empty queued mail")?;
+        let body = raw
+            .get(part.raw_body_offset() as usize..)
+            .context("invalid queued mail")?;
+        // Replies go to the agent; From names the signer, which receivers attribute mail to.
+        let mut headers = format!("From: {signer}\r\n");
+        if !agent.matches(signer) {
+            headers.push_str(&format!("Reply-To: {agent}\r\n"));
+        }
+        let mut content = Vec::new();
+        for (name, value) in message.headers_raw() {
+            let line = format!("{name}: {}", value.trim_start());
+            let line = if line.ends_with('\n') {
+                line
+            } else {
+                line + "\r\n"
             };
-            if let Some(value) = value.as_text() {
-                protected.push_str(&format!("{name}: <{value}>\n"));
-            } else if let Some(values) = value.as_text_list() {
-                protected.push_str(&format!(
-                    "{name}: {}\n",
-                    values
-                        .iter()
-                        .map(|value| format!("<{value}>"))
-                        .collect::<Vec<_>>()
-                        .join(" ")
-                ));
+            let lower = name.to_ascii_lowercase();
+            if PROTECTED
+                .iter()
+                .any(|protected| protected.eq_ignore_ascii_case(name))
+                && !matches!(lower.as_str(), "from" | "reply-to")
+            {
+                headers.push_str(&line);
+            } else if lower == "content-type" {
+                content.push(format!("{}; protected-headers=\"v1\"\r\n", line.trim_end()));
+            } else if lower == "content-transfer-encoding" {
+                content.push(line);
             }
         }
-        protected.push('\n');
-        protected.push_str(&body);
+        let mut entity = content.concat().into_bytes();
+        entity.extend_from_slice(headers.as_bytes());
+        entity.extend_from_slice(b"\r\n");
+        entity.extend_from_slice(body);
+        let entity = crlf(&entity);
         let dir = tempfile::tempdir()?;
-        let input = dir.path().join("task");
-        let mut signed = match signing {
+        let input = dir.path().join("entity");
+        fs::write(&input, &entity)?;
+        let signed = match signing {
             Signing::Openpgp { fingerprint, home } => {
-                fs::write(&input, protected)?;
                 let result = run(gpg()
                     .arg("--homedir")
                     .arg(root.join(home))
@@ -383,33 +402,43 @@ impl Signatures {
                         fingerprint,
                         "--digest-algo",
                         "SHA256",
+                        "--armor",
                         "--output",
                         "-",
-                        "--clearsign",
+                        "--detach-sign",
                     ])
-                    .arg(input))?;
+                    .arg(&input))?;
                 ensure!(result.status.success(), "OpenPGP signing failed");
-                lettre::message::SinglePart::plain(String::from_utf8(result.stdout)?).formatted()
+                let boundary = format!("=_{}", uuid::Uuid::new_v4().simple());
+                let mut signed = format!(
+                    "Content-Type: multipart/signed; micalg=pgp-sha256;\r\n \
+                     protocol=\"application/pgp-signature\"; boundary=\"{boundary}\"\r\n\r\n\
+                     --{boundary}\r\n"
+                )
+                .into_bytes();
+                signed.extend_from_slice(&entity);
+                signed.extend_from_slice(
+                    format!(
+                        "\r\n--{boundary}\r\n\
+                         Content-Type: application/pgp-signature; name=\"signature.asc\"\r\n\
+                         Content-Disposition: attachment; filename=\"signature.asc\"\r\n\r\n"
+                    )
+                    .as_bytes(),
+                );
+                signed.extend_from_slice(&result.stdout);
+                signed.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+                signed
             }
             Signing::Smime { certificate, key } => {
-                let part = lettre::message::SinglePart::plain(protected).formatted();
-                fs::write(&input, part)?;
                 let result = run(openssl()
-                    .args([
-                        "cms",
-                        "-sign",
-                        "-binary",
-                        "-nodetach",
-                        "-outform",
-                        "SMIME",
-                        "-in",
-                    ])
-                    .arg(input)
+                    .args(["cms", "-sign", "-binary", "-outform", "SMIME", "-in"])
+                    .arg(&input)
                     .arg("-signer")
                     .arg(root.join(certificate))
                     .arg("-inkey")
                     .arg(root.join(key)))?;
                 ensure!(result.status.success(), "S/MIME signing failed");
+                // openssl writes MIME-Version and the multipart/signed headers itself.
                 result.stdout
             }
         };
@@ -418,10 +447,11 @@ impl Signatures {
             wire.extend_from_slice(format!("Reply-To: {agent}\r\n").as_bytes());
         }
         for (name, value) in message.headers_raw() {
-            if matches!(
-                name.to_ascii_lowercase().as_str(),
-                "to" | "cc" | "subject" | "date" | "message-id" | "in-reply-to" | "references"
-            ) {
+            if PROTECTED
+                .iter()
+                .any(|protected| protected.eq_ignore_ascii_case(name))
+                && !matches!(name.to_ascii_lowercase().as_str(), "from" | "reply-to")
+            {
                 wire.extend_from_slice(format!("{name}: {}", value.trim_start()).as_bytes());
                 if !wire.ends_with(b"\n") {
                     wire.extend_from_slice(b"\r\n");
@@ -431,7 +461,7 @@ impl Signatures {
         if matches!(signing, Signing::Openpgp { .. }) {
             wire.extend_from_slice(b"MIME-Version: 1.0\r\n");
         }
-        wire.append(&mut signed);
+        wire.extend_from_slice(&signed);
         let wire = crlf(&wire);
         ensure!(wire.len() <= LIMIT, "signed mail exceeds size limit");
         Ok(wire)
@@ -442,62 +472,58 @@ fn normalize(value: &str) -> String {
     value.replace(':', "").to_ascii_uppercase()
 }
 
-struct Task {
-    recipient: MailAddress,
-    id: String,
-    subject: String,
-    body: String,
-    parent: Option<String>,
-    references: String,
+fn receipt(fingerprint: &str, signed_at: u64, entity: &[u8]) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    digest.update(normalize(fingerprint));
+    digest.update(signed_at.to_be_bytes());
+    digest.update(entity);
+    digest.finalize().into()
 }
 
-impl Task {
-    fn parse(text: &str) -> Option<Self> {
-        let text = text.replace("\r\n", "\n");
-        let (headers, body) = text.split_once("\n\n")?;
-        if headers.len() > 8192 || body.trim().is_empty() || text.contains(['\r', '\0']) {
-            return None;
-        }
-        let mut fields = BTreeMap::new();
-        for line in headers.lines() {
-            let (key, value) = line.split_once(':')?;
-            if !matches!(
-                key,
-                "Agent-To" | "Task-ID" | "Subject" | "In-Reply-To" | "References"
-            ) || fields.insert(key, value.trim()).is_some()
-            {
-                return None;
-            }
-        }
-        let id = message_id(fields.remove("Task-ID")?)?;
-        let recipient = fields.remove("Agent-To")?.parse().ok()?;
-        let subject = fields
-            .remove("Subject")
-            .unwrap_or("Signed agent task")
-            .to_owned();
-        let parent = match fields.remove("In-Reply-To") {
-            Some(value) => Some(message_id(value)?),
-            None => None,
-        };
-        let references = fields
-            .remove("References")
-            .unwrap_or("")
-            .split_whitespace()
-            .map(|value| message_id(value).map(|id| format!("<{id}>")))
-            .collect::<Option<Vec<_>>>()?
-            .join(" ");
-        Some(Self {
-            recipient,
-            id,
-            subject,
-            body: body.to_owned(),
-            parent,
-            references,
-        })
+/// Reads `openssl cms -print` output: "signingTime" is followed by a UTCTIME or
+/// GENERALIZEDTIME line such as "UTCTIME:Nov 23 10:00:00 2026 GMT".
+fn smime_signing_time(printed: &str) -> Option<u64> {
+    let mut lines = printed
+        .lines()
+        .skip_while(|line| !line.contains("signingTime"));
+    lines.next()?;
+    let value = lines
+        .take(3)
+        .find_map(|line| line.trim().split_once("TIME:").map(|(_, value)| value))?;
+    let mut fields = value.split_whitespace();
+    let month = fields.next()?;
+    let month = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ]
+    .iter()
+    .position(|name| *name == month)? as u64
+        + 1;
+    let day: u64 = fields.next()?.parse().ok()?;
+    let mut clock = fields.next()?.split(':').map(str::parse::<u64>);
+    let (hour, minute, second) = (
+        clock.next()?.ok()?,
+        clock.next()?.ok()?,
+        clock.next()?.ok()?,
+    );
+    let year: i64 = fields.next()?.parse().ok()?;
+    if fields.next() != Some("GMT") || !(1..=31).contains(&day) || hour > 23 || minute > 59 {
+        return None;
     }
+    // Days from civil date (Howard Hinnant's algorithm).
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let m = month as i64;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + day as i64 - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    u64::try_from(days * 86_400)
+        .ok()?
+        .checked_add(hour * 3600 + minute * 60 + second.min(60))
 }
 
-fn pgp_fingerprint(status: &str) -> Option<&str> {
+/// The primary-key fingerprint and signature time of exactly one valid signature.
+fn pgp_signature(status: &str) -> Option<(&str, u64)> {
     let mut records = status
         .lines()
         .filter_map(|line| line.strip_prefix("[GNUPG:] "));
@@ -512,7 +538,10 @@ fn pgp_fingerprint(status: &str) -> Option<&str> {
                 {
                     return None;
                 }
-                fingerprint = Some(*fields.get(10).or_else(|| fields.get(1))?);
+                fingerprint = Some((
+                    *fields.get(10).or_else(|| fields.get(1))?,
+                    fields.get(3)?.parse().ok()?,
+                ));
             }
             "BADSIG" | "ERRSIG" | "EXPSIG" | "EXPKEYSIG" | "REVKEYSIG" | "NO_PUBKEY"
             | "KEYEXPIRED" | "SIGEXPIRED" | "FAILURE" | "DECRYPTION_OKAY" => return None,
@@ -521,28 +550,6 @@ fn pgp_fingerprint(status: &str) -> Option<&str> {
         Some(())
     })?;
     fingerprint
-}
-
-fn clear_signed(text: &str) -> bool {
-    let mut lines = text.lines();
-    if lines.next() != Some("-----BEGIN PGP SIGNED MESSAGE-----") {
-        return false;
-    }
-    let mut markers = lines
-        .filter(|line| line.starts_with("-----BEGIN PGP ") || line.starts_with("-----END PGP "));
-    markers.next() == Some("-----BEGIN PGP SIGNATURE-----")
-        && markers.next() == Some("-----END PGP SIGNATURE-----")
-        && markers.next().is_none()
-        && text.trim_end().ends_with("\n-----END PGP SIGNATURE-----")
-}
-
-fn mime_body(entity: &[u8]) -> Option<String> {
-    let parsed = MessageParser::default().parse(entity)?;
-    let part = parsed.text_part(0)?;
-    match &part.body {
-        PartType::Text(text) => Some(text.to_string()),
-        _ => None,
-    }
 }
 
 fn content_type(mime: &ContentType<'_>, kind: &str, subtype: &str) -> bool {
@@ -594,4 +601,47 @@ fn run(command: &mut Command) -> Result<Output> {
             command.get_program().to_string_lossy()
         )
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reads_the_cms_signing_time() {
+        let printed = "        object: signingTime (1.2.840.113549.1.9.5)\n\
+                       \x20       set:\n\
+                       \x20         UTCTIME:Nov 23 10:00:05 2026 GMT\n";
+        assert_eq!(smime_signing_time(printed), Some(1_795_428_005));
+        let generalized = printed.replace("UTCTIME:Nov 23", "GENERALIZEDTIME:Feb 29");
+        assert_eq!(
+            smime_signing_time(&generalized.replace("2026", "2028")),
+            Some(1_835_431_205)
+        );
+        assert_eq!(smime_signing_time("no signing time"), None);
+        assert_eq!(smime_signing_time(&printed.replace("GMT", "UTC")), None);
+    }
+
+    #[test]
+    fn requires_exactly_one_valid_pgp_signature() {
+        let valid = "[GNUPG:] NEWSIG\n[GNUPG:] GOODSIG 0123 Someone\n\
+                     [GNUPG:] VALIDSIG SUBKEY 2026-11-23 1795428005 0 4 0 22 10 00 PRIMARY\n";
+        assert_eq!(pgp_signature(valid), Some(("PRIMARY", 1_795_428_005)));
+        assert_eq!(pgp_signature(&format!("{valid}{valid}")), None);
+        assert_eq!(pgp_signature(&valid.replace(" 10 00 ", " 2 00 ")), None);
+        assert_eq!(
+            pgp_signature(&format!("{valid}[GNUPG:] EXPKEYSIG 0123\n")),
+            None
+        );
+        assert_eq!(pgp_signature("[GNUPG:] NEWSIG\n"), None);
+    }
+
+    #[test]
+    fn receipts_cover_signer_time_and_content() {
+        let base = receipt("ab:cd", 1, b"entity");
+        assert_eq!(base, receipt("ABCD", 1, b"entity"));
+        assert_ne!(base, receipt("ABCE", 1, b"entity"));
+        assert_ne!(base, receipt("ABCD", 2, b"entity"));
+        assert_ne!(base, receipt("ABCD", 1, b"entity2"));
+    }
 }

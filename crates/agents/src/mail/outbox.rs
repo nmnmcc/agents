@@ -1,7 +1,7 @@
 use super::{
     inbox::{LOCAL_FROM, LOCAL_TO, unique_header},
     retry,
-    store::Folder,
+    store::{Folder, Query},
     transport::{self, Submission},
 };
 use crate::{
@@ -34,31 +34,39 @@ pub fn pending(workspace: &Workspace) -> Result<Pending> {
         .open(workspace.root(), workspace.mail_directory(), true)?;
     Ok(Pending {
         outbox_uid_validity: store.validity()?,
-        queued: store.search(&ready_query(), &[], TERMINAL)?,
-        rejected: store.search(
-            &format!("UNDELETED KEYWORD {SEND_FAILED} UNKEYWORD {SENT}"),
-            &[SEND_FAILED],
-            &[SENT],
-        )?,
-        expired: store.search(&format!("UNDELETED KEYWORD {EXPIRED}"), &[EXPIRED], &[])?,
+        queued: store.search(&READY_QUERY)?,
+        rejected: store.search(&Query {
+            required: &[SEND_FAILED],
+            excluded: &[SENT],
+            ..Query::default()
+        })?,
+        expired: store.search(&Query {
+            required: &[EXPIRED],
+            ..Query::default()
+        })?,
     })
 }
 
-pub fn flush(workspace: &Workspace) -> Result<()> {
+/// Delivers due outbox records. A message that cannot be delivered is retried or marked
+/// failed without holding up the others. Returns whether every due message was delivered.
+pub fn flush(workspace: &Workspace) -> Result<bool> {
     let mail = workspace.mail();
     let routes = workspace.mail_routes()?;
     let mut smtp = None;
     let mut store = mail.open(workspace.root(), workspace.mail_directory(), true)?;
-    let mut failed = false;
-    for uid in store.search(&ready_query(), &[], TERMINAL)? {
+    let mut delivered = true;
+    for uid in store.search(&READY_QUERY)? {
         let Some(raw) = store.message(uid)? else {
             continue;
         };
-        let Ok((mut entry, id, from, to)) = envelope(&routes, &raw) else {
-            store.set(uid, SEND_FAILED)?;
-            eprintln!("agents: invalid outbox UID {uid}; see mail pending");
-            failed = true;
-            continue;
+        let (mut entry, id, from, to) = match envelope(&routes, &raw) {
+            Ok(envelope) => envelope,
+            Err(error) => {
+                eprintln!("agents: invalid outbox UID {uid}: {error:#}");
+                store.set(uid, SEND_FAILED)?;
+                delivered = false;
+                continue;
+            }
         };
         if superseded(&routes, &mut store, uid, &id, &to)? {
             store.set(uid, SUPERSEDED)?;
@@ -66,51 +74,41 @@ pub fn flush(workspace: &Workspace) -> Result<()> {
         }
         let now = retry::now()?;
         if mail.retry.expired(entry.created, now) {
+            eprintln!("agents: outbox UID {uid} to {to} expired");
             store.set(uid, EXPIRED)?;
-            failed = true;
+            delivered = false;
             continue;
         }
         if entry.due > now {
             continue;
         }
-        let local = routes.route(&to).ok().map(Workspace::at_mailbox);
-        let outcome = if let Some(target) = local {
-            let mut inbox = target
-                .mail()
-                .open(target.root(), target.mail_directory(), false)?;
-            inbox.append(None, &stamp(&to, &from, entry.message)?)?;
-            Submission::Accepted
-        } else if let Some(config) = &mail.smtp {
-            let smtp_from = config.from.as_ref().unwrap_or(&from);
-            let signed = match mail.signatures.sign(
-                workspace.root(),
-                &from,
-                smtp_from,
-                &to,
-                &id,
-                entry.message,
-            ) {
-                Ok(signed) => signed,
-                Err(error) => {
-                    eprintln!("agents: cannot sign outbox UID {uid}: {error:#}");
-                    failed = true;
-                    continue;
+        let outcome = match routes.route(&to).ok().map(Workspace::at_mailbox) {
+            Some(target) => deliver_local(&target, &from, &to, entry.message),
+            None => match &mail.smtp {
+                Some(config) => {
+                    let smtp_from = config.from.as_ref().unwrap_or(&from);
+                    if smtp.is_none() {
+                        smtp = Some(transport::submission(config, workspace.root())?);
+                    }
+                    mail.signatures
+                        .sign(workspace.root(), &from, smtp_from, entry.message)
+                        .context("sign mail")
+                        .and_then(|signed| {
+                            transport::send(
+                                smtp.as_ref().expect("SMTP initialized"),
+                                &smtp_from.to_string(),
+                                &to.to_string(),
+                                &signed,
+                            )
+                        })
                 }
-            };
-            if smtp.is_none() {
-                smtp = Some(transport::submission(config, workspace.root())?);
-            }
-            transport::send(
-                smtp.as_ref().expect("SMTP initialized"),
-                &smtp_from.to_string(),
-                &to.to_string(),
-                &signed,
-            )?
-        } else {
-            eprintln!("agents: SMTP is not configured for outbox UID {uid}; mail remains queued");
-            failed = true;
-            continue;
-        };
+                None => Err(anyhow::anyhow!("SMTP is not configured")),
+            },
+        }
+        .unwrap_or_else(|error| {
+            eprintln!("agents: outbox UID {uid} to {to}: {error:#}");
+            Submission::Temporary
+        });
         match outcome {
             Submission::Accepted => {
                 store.set(uid, SENT)?;
@@ -127,11 +125,50 @@ pub fn flush(workspace: &Workspace) -> Result<()> {
             }
             Submission::Rejected => store.set(uid, SEND_FAILED)?,
         }
-        failed = true;
+        delivered = false;
         eprintln!("agents: delivery failed for outbox UID {uid}; see mail pending");
     }
-    ensure!(!failed, "some outgoing mail was not delivered");
-    Ok(())
+    Ok(delivered)
+}
+
+fn deliver_local(
+    target: &Workspace,
+    from: &MailAddress,
+    to: &MailAddress,
+    message: &[u8],
+) -> Result<Submission> {
+    let mut inbox = target
+        .mail()
+        .open(target.root(), target.mail_directory(), false)?;
+    inbox.append(None, &stamp(to, from, message)?)?;
+    Ok(Submission::Accepted)
+}
+
+/// Removes finished outbox records older than `retry.retain`.
+pub fn compact(workspace: &Workspace) -> Result<()> {
+    let mail = workspace.mail();
+    if mail.retry.retain == 0 {
+        return Ok(());
+    }
+    let mut store = mail.open(workspace.root(), workspace.mail_directory(), true)?;
+    let now = retry::now()?;
+    let mut old = Vec::new();
+    for state in TERMINAL {
+        for uid in store.search(&Query {
+            required: &[state],
+            ..Query::default()
+        })? {
+            if let Some(raw) = store.message(uid)?
+                && retry::QueueEntry::read(&raw)
+                    .is_ok_and(|entry| now.saturating_sub(entry.created) >= mail.retry.retain)
+            {
+                old.push(uid);
+            }
+        }
+    }
+    old.sort_unstable();
+    old.dedup();
+    store.expunge(&old)
 }
 
 pub(super) fn enqueue(store: &mut Folder, raw: &[u8], to: &MailAddress) -> Result<()> {
@@ -162,11 +199,14 @@ pub(super) fn stamp(to: &MailAddress, from: &MailAddress, raw: &[u8]) -> Result<
     Ok(stamped)
 }
 
-fn ready_query() -> String {
-    format!(
-        "UNDELETED KEYWORD {READY} UNKEYWORD {SENT} UNKEYWORD {SEND_FAILED} UNKEYWORD {EXPIRED} UNKEYWORD {SUPERSEDED}"
-    )
-}
+/// Every record in the outbox is queued until it reaches a terminal state.
+const READY_QUERY: Query<'static> = Query {
+    unseen: false,
+    required: &[],
+    excluded: TERMINAL,
+    header: None,
+    after_uid: 0,
+};
 
 fn envelope<'a>(
     routes: &MailRoutes,
@@ -207,15 +247,11 @@ fn superseded(
     id: &str,
     to: &MailAddress,
 ) -> Result<bool> {
-    for other in store
-        .search(
-            &format!("KEYWORD {READY} HEADER Message-ID \"{id}\""),
-            &[],
-            &[],
-        )?
-        .into_iter()
-        .filter(|other| *other > uid)
-    {
+    for other in store.search(&Query {
+        header: Some(("Message-ID", id)),
+        after_uid: uid,
+        ..Query::default()
+    })? {
         let Some(raw) = store.message(other)? else {
             continue;
         };

@@ -32,11 +32,12 @@ use sessions::Sessions;
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
+    time::Duration,
 };
 use store::Folder;
 
 pub use ingress::{ImapIngress, deliver};
-pub use outbox::{flush, pending};
+pub use outbox::{compact, flush, pending};
 pub use run::execute;
 pub use sessions::SessionBusy;
 
@@ -62,6 +63,12 @@ pub struct MailConfig {
 impl MailConfig {
     pub fn check(&self) -> Result<()> {
         self.signatures.check()?;
+        if let Some(incoming) = &self.imap {
+            ensure!(
+                incoming.poll_interval > 0,
+                "imap.poll_interval must be positive"
+            );
+        }
         if let Some(name) = &self.outbox {
             let incoming = self
                 .imap
@@ -73,6 +80,11 @@ impl MailConfig {
             );
         }
         Ok(())
+    }
+
+    /// How long the receiver may wait before checking the IMAP inbox again.
+    pub fn poll_interval(&self) -> Duration {
+        Duration::from_secs(self.imap.as_ref().map_or(60, |imap| imap.poll_interval))
     }
 
     fn open(&self, root: &Path, directory: &Path, outbox: bool) -> Result<Folder> {
@@ -178,8 +190,36 @@ impl<'a> MailAccess<'a> {
         })
     }
 
-    pub fn unread_refs(&self) -> Result<BTreeSet<MailRef>> {
-        self.inbox()?.unread_refs()
+    /// Unread mail no agent run was started for, oldest first.
+    pub fn pending_runs(&self) -> Result<Vec<MailRef>> {
+        self.inbox()?.pending_runs()
+    }
+
+    /// Records that a run for `mail` is starting, so it runs at most once.
+    pub fn dispatch(&self, mail: MailRef) -> Result<()> {
+        self.inbox()?.mark(mail, inbox::DISPATCHED, true)
+    }
+
+    /// Returns `mail` to the queue of messages awaiting a run.
+    pub fn undispatch(&self, mail: MailRef) -> Result<()> {
+        let mut inbox = self.inbox()?;
+        inbox.mark(mail, inbox::DISPATCHED, false)
+    }
+
+    pub fn fail(&self, mail: MailRef) -> Result<()> {
+        self.inbox()?.mark(mail, inbox::FAILED, true)
+    }
+
+    /// Clears the run state of `mail` so the daemon runs the agent for it again.
+    pub fn retry(&self, mail: MailRef) -> Result<()> {
+        let mut inbox = self.inbox()?;
+        inbox.mark(mail, inbox::FAILED, false)?;
+        inbox.mark(mail, inbox::DISPATCHED, false)
+    }
+
+    /// The local inbox file, whose metadata changes whenever mail arrives or changes state.
+    pub fn inbox_path(&self) -> PathBuf {
+        self.root.join(&self.directory).join("inbox.mbox")
     }
 
     fn inbox(&self) -> Result<Inbox<'_>> {
