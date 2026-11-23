@@ -1,5 +1,5 @@
 name: Setup
-description: Install Nix and, unless disabled, the devenv pinned by devenv.lock
+description: Install Nix with a cached store and, unless disabled, the devenv pinned by devenv.lock
 
 inputs:
   devenv:
@@ -12,6 +12,15 @@ runs:
     - uses: cachix/install-nix-action@3dc140bfc76c49fbd4dd958429132e3746bcb086 # v31.11.5
       with:
         github_access_token: ${{ github.token }}
+    # Restores the Nix store of this job's last run on main, so toolchains,
+    # the devenv shell and unchanged derivations are not downloaded or built
+    # again. Only runs outside pull requests save, which keeps caches within quota.
+    - uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569 # v7.0.2
+      with:
+        primary-key: nix-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'flake.nix', 'nix/**', 'rust-toolchain.toml', 'Cargo.lock') }}
+        restore-prefixes-first-match: nix-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-
+        save: ${{ github.event_name != 'pull_request' }}
+        gc-max-store-size: 6G
     - if: inputs.devenv == 'true'
       uses: cachix/cachix-action@38b082610b782e7e93e209c35fd730d399dee866 # v17
       with:
