@@ -50,7 +50,7 @@ pub struct MailConfig {
     smtp: Option<transport::Outgoing>,
     #[serde(default)]
     signatures: signatures::Signatures,
-    /// Allow unsigned mail to trigger agents. It cannot establish a reply or session identity.
+    /// Accept unsigned mail and use unverified sender and thread headers.
     #[serde(default)]
     allow_unsigned: bool,
     #[serde(default, deserialize_with = "retry::decode")]
@@ -185,6 +185,7 @@ impl<'a> MailAccess<'a> {
             self.mail.open(&self.root, &self.directory, false)?,
             self.address.clone(),
             &self.incoming,
+            self.mail.allow_unsigned,
         )
     }
 
@@ -223,8 +224,7 @@ impl<'a> MailAccess<'a> {
                         continue;
                     }
                     ensure!(
-                        self.outgoing
-                            .allows(address, reply.authenticated_sender.matches(address)),
+                        self.outgoing.allows(address, reply.sender.matches(address)),
                         "reply recipient is not authorized: {address}"
                     );
                     if add_recipient(&mut recipients, address) {
@@ -280,6 +280,7 @@ impl<'a> MailAccess<'a> {
             &to,
             &cc,
             &recipients[0],
+            &[],
             subject,
             request.body,
             reply.as_ref(),
@@ -326,6 +327,7 @@ fn compose(
     to: &[MailAddress],
     cc: &[MailAddress],
     first: &MailAddress,
+    reply_to: &[MailAddress],
     subject: &str,
     body: String,
     reply: Option<&Reply>,
@@ -350,6 +352,9 @@ fn compose(
     }
     for address in cc {
         builder = builder.cc(address.to_string().parse()?);
+    }
+    for address in reply_to {
+        builder = builder.reply_to(address.to_string().parse()?);
     }
     if let Some(reply) = reply {
         builder = builder

@@ -520,7 +520,7 @@
       "type": "object",
       "properties": {
         "allow_unsigned": {
-          "description": "Allow unsigned mail to trigger agents. It cannot establish a reply or session identity.",
+          "description": "Accept unsigned mail and use unverified sender and thread headers.",
           "type": "boolean",
           "default": false
         },
@@ -1398,7 +1398,7 @@
               "type": "object",
               "properties": {
                 "allow_unsigned": {
-                  "description": "Allow unsigned mail to trigger agents. It cannot establish a reply or session identity.",
+                  "description": "Accept unsigned mail and use unverified sender and thread headers.",
                   "type": "boolean",
                   "default": false
                 },

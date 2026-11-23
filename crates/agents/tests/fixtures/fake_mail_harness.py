@@ -70,7 +70,8 @@ def main():
         assert not call(6, "get_mail", mail)["message"]["unread"]
         client.stdin.close()
         assert client.wait(timeout=5) == 0
-    print("handled")
+    session = json.loads(sys.argv[2])
+    print(f"handled {session['id']} {'resume' if session['resume'] else 'start'}")
 
 
 if __name__ == "__main__":

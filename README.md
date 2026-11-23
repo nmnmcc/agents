@@ -150,11 +150,13 @@ it to handle the message as its role requires, reply when appropriate, and
 mark it read. The per-run `agents-mail` MCP server provides the same mailbox operations: list, search, get, thread,
 attachment, read state, send, and reply. Reading does not mark mail read.
 
-Repeat `--to`, `--cc`, or `--bcc` for multiple recipients. Replies preserve
-the thread and use `Reply-To` before `From`, subject to authorization.
-`--all` also includes visible To/Cc recipients, excluding self and
-duplicates; it never restores Bcc. Blind recipients do not appear in
-delivered headers.
+Repeat `--to`, `--cc`, or `--bcc` for multiple recipients. Replies to
+external signed mail use the configured signer's address, not the outer
+`Reply-To` or `From`. For local mail and explicitly enabled unsigned mail,
+`Reply-To` takes precedence over `From`, subject to authorization.
+`--all` includes visible To/Cc recipients
+from the imported message, excluding self and duplicates; it never
+restores Bcc. Blind recipients do not appear in delivered headers.
 
 ## Exchange mail with people
 
@@ -164,42 +166,58 @@ Use addresses your provider routes to and authorizes for submission.
 gateway. IMAP and SMTP passwords log in to the provider; they do not
 authenticate the person sending a task.
 
+Merge this mail configuration into the [sample project](samples/project).
+Replace `reviewer@example.test` with a mailbox your provider both delivers
+to and allows as a sender. For a single Agent, set its address under
+`agents.<id>.mail.address`; a top-level `mail.address` is a default for
+every agent, and resolved addresses must be unique.
+
 ```yaml
+agents:
+  reviewer:
+    mail:
+      address: reviewer@example.test
+
 mail:
-  address: "xxx.agent+xxx@nmnm.cc"
   trust: ["maintainer@example.test"]
   transport:
     imap:
-      endpoint: { host: imap.mail.me.com, port: 993 }
+      endpoint: { host: imap.example.test, port: 993 }
       login:
-        username: "<iCloud IMAP login>"
-        password: { file: "/home/agent/.config/agents/icloud-password" }
+        username: reviewer@example.test
+        password: { file: "/home/agent/.config/agents/imap-password" }
       mailbox: INBOX
     smtp:
-      endpoint: { host: smtp.mail.me.com, port: 587, security: starttls }
+      endpoint: { host: smtp.example.test, port: 587, security: starttls }
       login:
-        username: "<iCloud SMTP login>"
-        password: { file: "/home/agent/.config/agents/icloud-password" }
+        username: reviewer@example.test
+        password: { file: "/home/agent/.config/agents/smtp-password" }
     signatures:
       openpgp_keyring: "/home/agent/.config/agents/trusted.gpg"
       trusted:
         - method: openpgp
           address: "maintainer@example.test"
-          fingerprint: "<OpenPGP primary-key fingerprint>"
+          # Replace with the maintainer's OpenPGP primary-key fingerprint.
+          fingerprint: "0000000000000000000000000000000000000000"
         - method: smime
           address: "maintainer@example.test"
-          fingerprint: "<SHA-256 certificate fingerprint>"
+          # Replace with the SHA-256 fingerprint of their S/MIME certificate.
+          fingerprint: "0000000000000000000000000000000000000000000000000000000000000000"
       signing:
-        "xxx.agent+xxx@nmnm.cc":
+        reviewer@example.test:
           method: smime
           certificate: "/home/agent/.config/agents/signing.pem"
           key: "/home/agent/.config/agents/signing-key.pem"
 ```
 
-Use the provider's app-specific password where required. Check with your
-provider that the full address (including any `+tag`) can receive mail and
-can be used as an SMTP sender; these permissions are separate. For received
-OpenPGP mail, export trusted public keys to the binary keyring using
+Use the provider's app-specific password where required. A `+tag` address
+may be accepted for inbound delivery but not as an SMTP sender. If the
+provider delivers an alias to the configured IMAP folder, signed mail may
+use that alias in the outer `To:` while keeping the Agent's configured
+mailbox in the signed `Agent-To:`. The signing key in the configuration is
+indexed by that same configured mailbox.
+
+For received OpenPGP mail, export trusted public keys to the binary keyring using
 `gpg --export <fingerprint> > trusted.gpg`. For S/MIME, obtain the leaf
 fingerprint with `openssl x509 -in signer.pem -noout -sha256 -fingerprint`.
 The exact pinned certificate, not the public CA store or `From`, identifies
@@ -209,7 +227,7 @@ Send signed mail with this text **inside the signed part**, followed by a
 blank line and the task:
 
 ```text
-Agent-To: xxx.agent+xxx@nmnm.cc
+Agent-To: reviewer@example.test
 Task-ID: 550e8400-e29b-41d4-a716-446655440000@example.test
 Subject: Review this change
 
@@ -245,10 +263,13 @@ need GnuPG for OpenPGP and the OpenSSL CLI for S/MIME on `PATH`.
 `mail.transport.allow_unsigned: true` permits unsigned IMAP mail addressed
 to exactly one local agent in `To` or `Cc`, and enables explicit local
 import with `agents mail deliver --unsigned --recipient <address>`.
-**Anyone who can reach that mailbox can trigger the agent.** Leave it off
-on public or shared inboxes unless this is intentional. Such messages do
-not establish a reply identity or resume an existing session. Mail that
-still presents a signature but fails validation is not downgraded.
+Unsigned mail can trigger an agent, receive replies and resume a thread
+under the normal mail rules. It is labeled `authenticated: false`.
+**Enable this only if you accept unauthenticated sender, reply and thread
+headers.** Anyone who can deliver mail to the folder can forge these
+headers, including addresses in `mail.trust`. Turning the switch off also
+hides previously imported unsigned mail from the agent. Mail that still
+presents a signature but fails validation is not downgraded.
 
 When upgrading from 0.1, remove the old gateway integration. Neither the
 gateway headers nor `mail deliver --authenticated-from` are accepted as

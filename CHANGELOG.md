@@ -8,7 +8,7 @@
 
 Poll an ordinary IMAP inbox and verify task signatures against pinned identities.
 SMTP delivery signs tasks per recipient. Unsigned ingress is disabled by
-default and may be explicitly enabled without granting reply or thread identity.
+default. Opting in accepts unverified sender, reply and thread headers.
 
 The old mail gateway headers and `mail deliver --authenticated-from` are no longer
 accepted. See the signed mail setup in the README to migrate.

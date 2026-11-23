@@ -183,8 +183,12 @@ def project(root, role, address, port, smtp, keyring, trusted, signing):
                 "harnesses": {
                     "fake": {
                         "program": sys.executable,
-                        "args": [str(harness), "{{ mcp | tojson }}"],
-                        "capabilities": {"mcp": ["stdio"]},
+                        "args": [
+                            str(harness),
+                            "{{ mcp | tojson }}",
+                            "{{ session | tojson }}",
+                        ],
+                        "capabilities": {"mcp": ["stdio"], "sessions": "supplied"},
                     },
                 },
                 "mail": {
@@ -369,8 +373,11 @@ def test(binary, imap_port):
                 + b"\r\nFrom: "
                 + HUMAN.encode()
                 + (
-                    b"\r\nX-Agents-Local-From: human@example.test\r\n"
+                    b"\r\nX-Agents-Local-From: impostor@example.test\r\n"
                     b"X-Agents-Envelope-To: agents+build@example.test\r\n"
+                    b"Message-ID: <unsigned@example.test>\r\n"
+                    b"In-Reply-To: <start@example.test>\r\n"
+                    b"References: <start@example.test>\r\n"
                     b"Subject: Unsigned\r\n\r\nAnonymous task"
                 )
             )
@@ -412,7 +419,9 @@ def test(binary, imap_port):
                 mail(build, "thread", *reference(initial)).stdout
             )["messages"]
             assert len(thread_items) == 2, thread_items
-            assert cli(build, "--once").stdout.count(b"handled") == 3
+            handled = cli(build, "--once").stdout.splitlines()
+            assert len(handled) == 3
+            initial_session = handled[0].split()[1]
             assert not cli(build, "--once").stdout
             assert not search(build, "Anonymous task")
             mail(build, "deliver", task=replay)
@@ -453,17 +462,16 @@ def test(binary, imap_port):
             configuration = json.loads(build.read_text())
             configuration["mail"]["transport"]["allow_unsigned"] = True
             build.write_text(json.dumps(configuration))
-            assert cli(build, "--once").stdout.count(b"handled") == 1
-            (anonymous,) = search(build, "Anonymous task")
-            assert not anonymous["authenticated"] and anonymous["from"] != HUMAN
-            error = mail(
-                build,
-                "reply",
-                *reference(anonymous),
-                task=b"Do not reply",
-                success=False,
+            assert (
+                cli(build, "--once").stdout.strip()
+                == b"handled " + initial_session + b" resume"
             )
-            assert b"no trusted reply address" in error.stderr
+            (anonymous,) = search(build, "Anonymous task")
+            assert not anonymous["authenticated"] and anonymous["from"] == HUMAN
+            mail(build, "reply", *reference(anonymous), task=b"Reply to unsigned task")
+            mail(build, "flush")
+            assert smtp.sent[-1][:2] == (BUILDER, HUMAN)
+            assert smtp.sent[-1][2]["In-Reply-To"] == "<unsigned@example.test>"
             assert not cli(build, "--once").stdout
             mail(
                 build,
@@ -475,7 +483,14 @@ def test(binary, imap_port):
                 success=False,
             )
             mail(build, "deliver", "--unsigned", "--recipient", BUILDER, task=unsigned)
-            assert cli(build, "--once").stdout.count(b"handled") == 1
+            assert (
+                cli(build, "--once").stdout.strip()
+                == b"handled " + initial_session + b" resume"
+            )
+            configuration["mail"]["transport"]["allow_unsigned"] = False
+            build.write_text(json.dumps(configuration))
+            assert not search(build, "Anonymous task")
+            assert not cli(build, "--once").stdout
         finally:
             smtp.shutdown()
             thread.join()

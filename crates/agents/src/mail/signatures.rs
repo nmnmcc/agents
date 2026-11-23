@@ -177,7 +177,7 @@ impl Signatures {
         };
         let recipient = task.recipient;
         let reply = task.parent.map(|parent| Reply {
-            authenticated_sender: sender.clone(),
+            sender: sender.clone(),
             to: Vec::new(),
             cc: Vec::new(),
             subject: String::new(),
@@ -189,6 +189,7 @@ impl Signatures {
             std::slice::from_ref(&recipient),
             &[],
             &recipient,
+            &[],
             &task.subject,
             task.body,
             reply.as_ref(),

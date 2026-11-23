@@ -1,6 +1,6 @@
 use super::{
-    MailAccess, compose,
-    inbox::{INGESTED, LOCAL_TO, UNSIGNED, authenticated_sender, unique_header},
+    MailAccess, Reply, compose,
+    inbox::{INGESTED, LOCAL_TO, UNSIGNED, addresses, message_ids, routing_sender, unique_header},
     outbox::{message_id, stamp},
     signatures::{LIMIT, Verified},
     store, transport,
@@ -17,6 +17,11 @@ use std::{collections::BTreeSet, fs::OpenOptions};
 pub struct ImapIngress {
     validity: Option<u32>,
     last: u32,
+}
+
+enum Import {
+    Signed,
+    Unsigned(String),
 }
 
 impl ImapIngress {
@@ -39,11 +44,11 @@ impl ImapIngress {
                 let id = format!("imap-{validity}-{uid}@unsigned.invalid");
                 let mail = workspace.mail();
                 if let Some(task) = mail.signatures.verify(workspace.root(), &raw)? {
-                    import(workspace, routes, task, false)?;
+                    import(workspace, routes, task, Import::Signed)?;
                 } else if mail.allow_unsigned
-                    && let Some(task) = unsigned_task(workspace, routes, None, &raw, id)?
+                    && let Some(task) = unsigned_task(workspace, routes, None, &raw, &id)?
                 {
-                    import(workspace, routes, task, true)?;
+                    import(workspace, routes, task, Import::Unsigned(id))?;
                 }
             }
             self.last = uid;
@@ -61,23 +66,26 @@ pub fn deliver(
     ensure!(raw.len() <= LIMIT, "mail exceeds size limit");
     let routes = workspace.mail_routes()?;
     let mail = workspace.mail();
-    let task = if unsigned {
+    let (task, mode) = if unsigned {
         ensure!(mail.allow_unsigned, "unsigned mail ingress is disabled");
         let recipient = recipient.context("--unsigned requires --recipient")?;
         let id = format!("{}@unsigned.invalid", uuid::Uuid::new_v4());
-        unsigned_task(workspace, &routes, Some(recipient), raw, id)?
-            .context("not a supported unsigned mail message")?
+        let task = unsigned_task(workspace, &routes, Some(recipient), raw, &id)?
+            .context("not a supported unsigned mail message")?;
+        (task, Import::Unsigned(id))
     } else {
-        mail.signatures
+        let task = mail
+            .signatures
             .verify(workspace.root(), raw)?
-            .context("mail has no valid trusted signature and protected task")?
+            .context("mail has no valid trusted signature and protected task")?;
+        (task, Import::Signed)
     };
     ensure!(
         recipient.is_none_or(|address| address.matches(&task.recipient)),
         "mail recipient mismatch"
     );
     ensure!(
-        import(workspace, &routes, task, unsigned)?,
+        import(workspace, &routes, task, mode)?,
         "mail recipient or sender is not permitted"
     );
     Ok(())
@@ -87,7 +95,7 @@ fn import(
     workspace: &Workspace,
     routes: &MailRoutes,
     task: Verified,
-    unsigned: bool,
+    mode: Import,
 ) -> Result<bool> {
     let Ok(mailbox) = routes.route(&task.recipient) else {
         return Ok(false);
@@ -96,7 +104,7 @@ fn import(
         return Ok(false);
     }
     let access = MailAccess::new(workspace.mail(), routes, mailbox)?;
-    if !unsigned && !access.incoming.allows(&task.sender, true) {
+    if !access.incoming.allows(&task.sender, true) {
         return Ok(false);
     }
     let lock = store::prepare(workspace.root(), workspace.mail_directory(), "import.lock")?;
@@ -107,23 +115,28 @@ fn import(
         .open(workspace.root(), workspace.mail_directory(), false)?;
     // The durable receipt and the task are the same record; there is no second
     // write to lose on a crash. Hold the lock across lookup and append.
+    let receipt = match &mode {
+        Import::Signed => "signed",
+        Import::Unsigned(receipt) => receipt,
+    };
     for uid in inbox.search("ALL", &[], &[])? {
         if let Some(raw) = inbox.message(uid)?
             && let Some(message) = MessageParser::default().parse(&raw)
-            && matches!(unique_header(&message, INGESTED), Ok(Some("yes")))
-            && message.message_id().and_then(message_id).as_deref() == Some(task.id.as_str())
-            && authenticated_sender(&message).is_ok_and(|sender| sender.matches(&task.sender))
+            && matches!(unique_header(&message, INGESTED), Ok(Some(id)) if id == receipt)
             && unique_header(&message, LOCAL_TO)
                 .ok()
                 .flatten()
                 .and_then(|value| value.parse::<MailAddress>().ok())
                 .is_some_and(|address| address.matches(&task.recipient))
+            && (matches!(&mode, Import::Unsigned(_))
+                || (message.message_id().and_then(message_id).as_deref() == Some(task.id.as_str())
+                    && routing_sender(&message).is_ok_and(|sender| sender.matches(&task.sender))))
         {
             return Ok(true);
         }
     }
-    let mut record = format!("{INGESTED}: yes\r\n").into_bytes();
-    if unsigned {
+    let mut record = format!("{INGESTED}: {receipt}\r\n").into_bytes();
+    if matches!(&mode, Import::Unsigned(_)) {
         record.extend_from_slice(format!("{UNSIGNED}: yes\r\n").as_bytes());
     }
     record.extend_from_slice(&stamp(&task.recipient, &task.sender, &task.message)?);
@@ -136,7 +149,7 @@ fn unsigned_task(
     routes: &MailRoutes,
     recipient: Option<&MailAddress>,
     raw: &[u8],
-    id: String,
+    fallback_id: &str,
 ) -> Result<Option<Verified>> {
     if raw.len() > LIMIT {
         return Ok(None);
@@ -157,15 +170,29 @@ fn unsigned_task(
     }) {
         return Ok(None);
     }
+    let (Ok(from), Ok(to), Ok(cc), Ok(reply_to), Ok(id)) = (
+        addresses(message.from()),
+        addresses(message.to()),
+        addresses(message.cc()),
+        addresses(message.reply_to()),
+        unique_header(&message, "Message-ID"),
+    ) else {
+        return Ok(None);
+    };
+    let [sender] = from.as_slice() else {
+        return Ok(None);
+    };
+    let sender = sender.clone();
+    let id = id
+        .and_then(message_id)
+        .unwrap_or_else(|| fallback_id.to_owned());
     let recipient = if let Some(recipient) = recipient {
         recipient.clone()
     } else {
         let mut seen = BTreeSet::new();
-        let matched = [message.to(), message.cc()]
-            .into_iter()
-            .flatten()
-            .flat_map(|addresses| addresses.iter())
-            .filter_map(|entry| entry.address()?.parse::<MailAddress>().ok())
+        let matched = to
+            .iter()
+            .chain(&cc)
             .filter(|address| {
                 routes
                     .route(address)
@@ -176,22 +203,39 @@ fn unsigned_task(
         let [recipient] = matched.as_slice() else {
             return Ok(None);
         };
-        recipient.clone()
+        (*recipient).clone()
     };
     let Some(body) = message.body_text(0).filter(|body| !body.trim().is_empty()) else {
         return Ok(None);
     };
-    let sender = "anonymous@unsigned.invalid"
-        .parse::<MailAddress>()
-        .expect("valid placeholder address");
+    let references = message_ids(message.references());
+    let parents = message_ids(message.in_reply_to());
+    let reply = parents.first().or(references.last()).map(|parent| Reply {
+        sender: sender.clone(),
+        to: Vec::new(),
+        cc: Vec::new(),
+        subject: String::new(),
+        parent: format!("<{parent}>"),
+        references: references
+            .iter()
+            .map(|id| format!("<{id}>"))
+            .collect::<Vec<_>>()
+            .join(" "),
+    });
+    let to = if to.is_empty() && cc.is_empty() {
+        std::slice::from_ref(&recipient)
+    } else {
+        &to
+    };
     let message = compose(
         &sender,
-        std::slice::from_ref(&recipient),
-        &[],
+        to,
+        &cc,
         &recipient,
+        &reply_to,
         message.subject().unwrap_or("Unsigned agent task"),
         body.into_owned(),
-        None,
+        reply.as_ref(),
         &id,
     )?;
     Ok(Some(Verified {

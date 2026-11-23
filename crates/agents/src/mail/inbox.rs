@@ -20,10 +20,11 @@ pub struct Inbox<'a> {
     address: MailAddress,
     validity: u32,
     incoming: &'a AddressPolicy,
+    allow_unsigned: bool,
 }
 
 pub struct Reply {
-    pub authenticated_sender: MailAddress,
+    pub sender: MailAddress,
     pub to: Vec<MailAddress>,
     pub cc: Vec<MailAddress>,
     pub subject: String,
@@ -57,6 +58,7 @@ impl<'a> Inbox<'a> {
         folder: Folder,
         address: MailAddress,
         incoming: &'a AddressPolicy,
+        allow_unsigned: bool,
     ) -> Result<Self> {
         let validity = folder.validity()?;
         Ok(Self {
@@ -64,6 +66,7 @@ impl<'a> Inbox<'a> {
             address,
             validity,
             incoming,
+            allow_unsigned,
         })
     }
 
@@ -73,9 +76,8 @@ impl<'a> Inbox<'a> {
             .flatten()
             .and_then(|value| value.parse::<MailAddress>().ok())
             .is_some_and(|address| address.matches(&self.address))
-            && (is_unsigned(message)
-                || authenticated_sender(message)
-                    .is_ok_and(|sender| self.incoming.allows(&sender, true)))
+            && (self.allow_unsigned || !is_unsigned(message))
+            && routing_sender(message).is_ok_and(|sender| self.incoming.allows(&sender, true))
     }
 
     fn candidates(&mut self, extra: &str, unread: bool, before: Option<u32>) -> Result<Vec<u32>> {
@@ -115,13 +117,6 @@ impl<'a> Inbox<'a> {
 
     pub fn event(&mut self, mail: MailRef) -> Result<MailEvent> {
         self.inspect(mail, |_, message| {
-            if is_unsigned(message) {
-                return Ok(MailEvent {
-                    mail,
-                    sender: "unsigned".into(),
-                    ids: Vec::new(),
-                });
-            }
             let mut ids = message_ids(message.references());
             ids.extend(message_ids(message.in_reply_to()));
             ids.extend(unique_header(message, "Message-ID")?.and_then(super::outbox::message_id));
@@ -129,7 +124,7 @@ impl<'a> Inbox<'a> {
             ids.dedup();
             Ok(MailEvent {
                 mail,
-                sender: authenticated_sender(message)?.routing_key(),
+                sender: routing_sender(message)?.routing_key(),
                 ids,
             })
         })
@@ -246,11 +241,7 @@ impl<'a> Inbox<'a> {
 
     pub fn reply(&mut self, id: MailRef, all: bool) -> Result<Reply> {
         self.inspect(id, |_, message| {
-            ensure!(
-                !is_unsigned(message),
-                "unsigned mail has no trusted reply address"
-            );
-            let authenticated_sender = authenticated_sender(message)?;
+            let sender = routing_sender(message)?;
             let reply_to_count = message
                 .headers()
                 .iter()
@@ -291,7 +282,7 @@ impl<'a> Inbox<'a> {
                 format!("Re: {subject}")
             };
             Ok(Reply {
-                authenticated_sender,
+                sender,
                 to,
                 cc,
                 subject,
@@ -361,7 +352,7 @@ impl<'a> Inbox<'a> {
     }
 }
 
-fn addresses(header: Option<&Address<'_>>) -> Result<Vec<MailAddress>> {
+pub(super) fn addresses(header: Option<&Address<'_>>) -> Result<Vec<MailAddress>> {
     header
         .into_iter()
         .flat_map(Address::iter)
@@ -389,9 +380,9 @@ pub fn unique_header<'a>(message: &'a Message<'_>, name: &str) -> Result<Option<
     ))
 }
 
-pub(super) fn authenticated_sender(message: &Message<'_>) -> Result<MailAddress> {
+pub(super) fn routing_sender(message: &Message<'_>) -> Result<MailAddress> {
     unique_header(message, LOCAL_FROM)?
-        .context("mail has no authenticated sender")?
+        .context("mail has no routing sender")?
         .parse()
         .map_err(anyhow::Error::msg)
 }
@@ -413,7 +404,7 @@ fn thread_root<'a>(message: &'a Message<'_>) -> Option<&'a str> {
         .map(|id| id.trim_matches(['<', '>']))
 }
 
-fn message_ids(value: &HeaderValue<'_>) -> Vec<String> {
+pub(super) fn message_ids(value: &HeaderValue<'_>) -> Vec<String> {
     if let Some(ids) = value.as_text_list() {
         ids.iter()
             .filter_map(|id| super::outbox::message_id(id))
