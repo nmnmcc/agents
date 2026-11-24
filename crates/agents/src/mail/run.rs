@@ -9,7 +9,6 @@ use crate::{
     types::{Id, Program},
 };
 use anyhow::{Context, Result, ensure};
-use serde_json::Value;
 use std::{fs, io, path::Path, process::ExitStatus, time::Duration};
 
 /// Runs `project`'s agent on one message in its inbox.
@@ -78,10 +77,9 @@ fn execute_in(
     let reported_id = plan.reports_session_id().then(SessionId::default);
     let mail = access.inbox()?.get(message)?;
     let prompt = format!(
-        "The new message in your inbox follows. {} Handle it as a request from that \
+        "The new message in your inbox follows. Handle it as a request from its \
          sender within your role: use agents-mail to read its thread, reply when \
          appropriate, and mark the message read once handled.\n{}\n",
-        trust(&mail),
         serde_json::to_string_pretty(&mail)?
     );
     let status = mcp::with_bridge(
@@ -122,33 +120,4 @@ fn execute_in(
         }
     }
     Ok(status)
-}
-
-/// Describes how far the sender of `mail` was verified.
-fn trust(mail: &Value) -> String {
-    let summary = &mail["message"];
-    let from = summary["from"].as_str().unwrap_or("unknown");
-    if summary["authenticated"].as_bool() == Some(true) {
-        let words: Vec<&str> = summary["authentication"]
-            .as_str()
-            .unwrap_or_default()
-            .split(' ')
-            .collect();
-        match words.as_slice() {
-            ["dkim", domain] => format!(
-                "Its sender {from} is authenticated by a DKIM signature of {domain}, \
-                 verified by the mail provider."
-            ),
-            ["arc", sealer, "dkim", domain] => format!(
-                "Its sender {from} is authenticated by a DKIM signature of {domain}, \
-                 as reported by the trusted forwarder {sealer}."
-            ),
-            _ => format!("Its sender {from} is authenticated by a pinned signature."),
-        }
-    } else {
-        format!(
-            "Its sender is UNAUTHENTICATED: the message claims to be from {from}, \
-             but anyone could have sent it."
-        )
-    }
 }

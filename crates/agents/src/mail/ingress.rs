@@ -1,6 +1,6 @@
 use super::{
     MailAccess, dkim,
-    inbox::{AUTHENTICATION, INGESTED, LOCAL_FROM, LOCAL_TO, UNSIGNED, addresses, unique_header},
+    inbox::{INGESTED, LOCAL_FROM, LOCAL_TO, UNSIGNED, addresses, unique_header},
     retry,
     signatures::{LIMIT, PROTECTED, Verified},
     store::{self, Folder, Query},
@@ -165,8 +165,6 @@ struct Letter {
     /// When the receipt may be forgotten; later replays fail signature age checks.
     expires: u64,
     unsigned: bool,
-    /// How the sender was authenticated, for authenticated mail.
-    authentication: Option<String>,
     sender: MailAddress,
     recipients: Vec<MailAddress>,
     /// Headers and body of the imported message, without local routing headers.
@@ -221,7 +219,7 @@ impl Letter {
                 .as_ref()
                 .is_none_or(|covered| covered.contains(&name.to_ascii_lowercase()))
         };
-        let (receipt, expires, sender, entity, authentication) = match origin {
+        let (receipt, expires, sender, entity) = match origin {
             Origin::Unsigned => {
                 ensure!(
                     looks_unsigned(&outer),
@@ -233,20 +231,13 @@ impl Letter {
                      (mail.transport.dangerously_allow_unsigned)"
                 );
                 let sender = from()?;
-                (
-                    Sha256::digest(raw).into(),
-                    u64::MAX,
-                    sender,
-                    raw.to_vec(),
-                    None,
-                )
+                (Sha256::digest(raw).into(), u64::MAX, sender, raw.to_vec())
             }
             Origin::Signed(verified) => (
                 verified.receipt,
                 verified.signed_at.saturating_add(mail.signatures.max_age()),
                 verified.signer,
                 verified.entity,
-                Some(verified.method.to_owned()),
             ),
             Origin::Dkim(sender, authenticated) => {
                 let signed_at = match authenticated.signed_at {
@@ -266,7 +257,6 @@ impl Letter {
                     signed_at.saturating_add(mail.signatures.max_age()),
                     sender,
                     raw.to_vec(),
-                    Some(authenticated.describe()),
                 )
             }
         };
@@ -386,7 +376,6 @@ impl Letter {
             receipt,
             expires,
             unsigned,
-            authentication,
             sender,
             recipients,
             message: crlf(&record),
@@ -420,9 +409,6 @@ impl Letter {
             );
             if self.unsigned {
                 record.push_str(&format!("{UNSIGNED}: yes\r\n"));
-            }
-            if let Some(authentication) = &self.authentication {
-                record.push_str(&format!("{AUTHENTICATION}: {authentication}\r\n"));
             }
             let mut record = record.into_bytes();
             record.extend_from_slice(&self.message);

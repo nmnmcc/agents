@@ -29,23 +29,12 @@ pub(super) struct Dkim {
 pub(super) struct Authenticated {
     /// The DKIM signing domain aligned with the From domain.
     pub domain: String,
-    /// The trusted ARC sealer that reported the DKIM result, for forwarded mail.
-    pub sealer: Option<String>,
     /// Lowercase names of the headers the authenticating signature covers.
     pub covered: BTreeSet<String>,
     /// Unix time the authenticating signature was made, when it says so.
     pub signed_at: Option<u64>,
     /// The signature value, unique to this signature.
     pub signature: String,
-}
-
-impl Authenticated {
-    pub fn describe(&self) -> String {
-        match &self.sealer {
-            None => format!("dkim {}", self.domain),
-            Some(sealer) => format!("arc {sealer} dkim {}", self.domain),
-        }
-    }
 }
 
 /// Headers that must occur at most once, since DKIM verifiers and mail readers may pick
@@ -196,7 +185,6 @@ impl Dkim {
         let mut authenticated = signature(&[signature_tags], &sealer, signed_at)?
             .context("invalid ARC message signature")?;
         authenticated.domain = signer;
-        authenticated.sealer = Some(sealer);
         Ok(authenticated)
     }
 }
@@ -237,7 +225,6 @@ fn signature(
     };
     Ok(Some(Authenticated {
         domain: domain.to_owned(),
-        sealer: None,
         covered,
         signed_at: signed_at.or_else(|| times.into_iter().max()),
         signature: values.join(" "),
@@ -502,7 +489,7 @@ mod tests {
     fn trusts_aligned_dkim_from_the_provider_on_top() {
         let verdict = "Authentication-Results: mx.provider.test; dkim=pass header.d=example.com header.b=ABCDEFGH\r\n";
         let ok = authenticate(&dkim(&[]), &format!("{verdict}{SIGNATURE}")).unwrap();
-        assert_eq!(ok.describe(), "dkim example.com");
+        assert_eq!(ok.domain, "example.com");
         assert_eq!(ok.signed_at, Some(1_700_000_000));
         assert!(ok.covered.contains("to") && !ok.covered.contains("cc"));
 
@@ -556,7 +543,7 @@ mod tests {
             ARC-Message-Signature: i=1; a=rsa-sha256; d=evil.test; s=a; h=from; bh=X; b=AMS1\r\n\
             ARC-Authentication-Results: i=1; evil.test; dkim=pass header.d=example.com\r\n";
         let ok = authenticate(&dkim(&["lists.test"]), &format!("{arc}{SIGNATURE}")).unwrap();
-        assert_eq!(ok.describe(), "arc lists.test dkim example.com");
+        assert_eq!(ok.domain, "example.com");
         assert_eq!(ok.signed_at, Some(1_700_000_100));
         assert!(ok.covered.contains("cc"));
         assert!(authenticate(&dkim(&["evil.test"]), &format!("{arc}{SIGNATURE}")).is_err());

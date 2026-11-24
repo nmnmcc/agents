@@ -319,9 +319,8 @@ replays are recognized by the signed `Message-ID` or the signature.
 For forwarded mail, `arc_sealers` lists trusted forwarders. When the provider
 reports `arc=pass` and the latest ARC set is sealed by a listed domain, the
 DKIM verdict recorded by that forwarder is used instead. With DKIM
-configured, `agents mail deliver` also accepts such mail. The prompt and
-`authentication` field (`dkim <domain>` or `arc <sealer> dkim <domain>`) show
-how the sender was authenticated.
+configured, `agents mail deliver` also accepts such mail. Authenticated mail
+is handled the same way however it was authenticated.
 
 ### Optional unsigned ingress
 

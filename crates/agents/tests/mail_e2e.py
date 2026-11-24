@@ -605,7 +605,6 @@ def test(binary, imap_port):
             assert cli(build, "--once").stdout.count(b"handled") == 1
             (dkim,) = search(build, "DKIM task")
             assert dkim["authenticated"] and dkim["from"] == HUMAN
-            assert dkim["authentication"] == "dkim example.test"
             assert not search(build, "Forged verdict")
             assert not search(build, "Buried verdict")
             with imap_login(imap_port) as connection:

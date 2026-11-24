@@ -96,8 +96,6 @@ pub(super) const PROTECTED: &[&str] = &[
 /// A message whose signature is valid and made by a pinned signer.
 pub(super) struct Verified {
     pub signer: MailAddress,
-    /// `openpgp` or `smime`.
-    pub method: &'static str,
     /// The signed MIME entity, including its own (possibly protected) headers.
     pub entity: Vec<u8>,
     /// Unix time the signature was made.
@@ -264,7 +262,6 @@ impl Signatures {
         Ok(Verified {
             receipt: receipt(fingerprint, signed_at, entity),
             signer,
-            method: "openpgp",
             entity: entity.to_vec(),
             signed_at,
         })
@@ -331,7 +328,6 @@ impl Signatures {
         Ok(Verified {
             receipt: receipt(fingerprint, signed_at, &entity),
             signer,
-            method: "smime",
             entity,
             signed_at,
         })
