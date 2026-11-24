@@ -44,6 +44,12 @@ impl Renderer {
         jinja.set_undefined_behavior(UndefinedBehavior::Strict);
         jinja.set_auto_escape_callback(|_| AutoEscape::None);
         jinja.set_keep_trailing_newline(true);
+        // Unlike `tojson`, does not escape HTML characters such as `<` in Message-IDs.
+        jinja.add_filter("json", |value: minijinja::Value| {
+            serde_json::to_string_pretty(&value).map_err(|error| {
+                minijinja::Error::new(minijinja::ErrorKind::InvalidOperation, error.to_string())
+            })
+        });
         Ok(Self {
             jinja,
             context: minijinja::Value::from_serialize(&globals),
@@ -160,6 +166,15 @@ mod tests {
 
     fn js(code: &str) -> Template {
         serde_json::from_value(json!({ "js": code })).unwrap()
+    }
+
+    #[test]
+    fn json_filter_keeps_mail_headers_readable() {
+        let renderer = Renderer::new(json!({"mail": {"id": "<a@b>"}})).unwrap();
+        let text = renderer
+            .string(&Template::Text("{{ mail | json }}".into()))
+            .unwrap();
+        assert_eq!(text, "{\n  \"id\": \"<a@b>\"\n}");
     }
 
     #[test]

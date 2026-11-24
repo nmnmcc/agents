@@ -1,3 +1,4 @@
+mod dkim;
 mod inbox;
 mod ingress;
 pub mod mcp;
@@ -51,6 +52,9 @@ pub struct MailConfig {
     smtp: Option<transport::Outgoing>,
     #[serde(default)]
     signatures: signatures::Signatures,
+    /// Authenticate mail by the DKIM and ARC verdicts of a trusted mail provider.
+    #[serde(default)]
+    dkim: dkim::Dkim,
     /// Accept unsigned mail. Anyone who can deliver mail to the inbox can forge
     /// From, Reply-To, or thread headers to impersonate a trusted sender,
     /// redirect replies, or resume an existing agent session.
@@ -63,6 +67,7 @@ pub struct MailConfig {
 impl MailConfig {
     pub fn check(&self) -> Result<()> {
         self.signatures.check()?;
+        self.dkim.check()?;
         if let Some(incoming) = &self.imap {
             ensure!(
                 incoming.poll_interval > 0,

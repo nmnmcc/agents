@@ -9,7 +9,10 @@ import sys
 def main():
     assert "AGENTS_SMOKE_IMAP" not in os.environ
     header, payload = sys.stdin.read().split("\n", 1)
-    assert header.startswith("The new message in your inbox follows."), header
+    if not header.startswith("The new message in your inbox follows."):
+        # A configured prompt template; the test checks the rendered line.
+        assert header.startswith("Custom prompt"), header
+        print(f"prompt: {header}")
     trigger = json.loads(payload)
     server = json.loads(sys.argv[1])["agents-mail"]
     with subprocess.Popen(

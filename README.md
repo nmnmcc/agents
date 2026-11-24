@@ -52,6 +52,18 @@ A run, including any processes the harness started, is killed after
 `agents.<id>.timeout` seconds (default 3600; set it for every agent in
 `agents.default`). `after` hooks still run, with a null `status`.
 
+The agent receives the new message as a prompt on standard input. Customize
+it with a template in `mail.prompt`, or per agent in `agents.<id>.mail.prompt`:
+MiniJinja text or `{"js": "..."}` like other templates. The context has
+`agent` (`id`, `description`, `instructions`), `address` (the agent's mail
+address) and `mail` (the message as `agents mail get` prints it). The
+`json` filter prints a value as indented JSON. The default is:
+
+```jinja
+The new message in your inbox follows. Handle it as a request from its sender within your role: use agents-mail to read its thread, reply when appropriate, and mark the message read once handled.
+{{ mail | json }}
+```
+
 The service reloads the project configuration when its files change,
 including `.agents.d/` layers, referenced files, and the projects in a
 `mail.workspace`. Runs already in progress finish with the configuration
@@ -286,6 +298,41 @@ sending, use `signing.<address>: { method: openpgp, fingerprint: "...",
 home: "/path/to/private/gnupg-home" }`. Protect private files and make sure
 the service can sign without an interactive prompt. Non-Nix installations
 need GnuPG for OpenPGP and the OpenSSL CLI for S/MIME on `PATH`.
+
+### DKIM and ARC through a trusted provider
+
+Mail from ordinary webmail and clients that do not sign can be authenticated
+by the DKIM verdict of the receiving mail provider:
+
+```json
+"transport": {
+  "dkim": {
+    "authserv_ids": ["mx.example.com"],
+    "arc_sealers": ["google.com"]
+  }
+}
+```
+
+`authserv_ids` lists the provider's identifiers in `Authentication-Results`.
+`agents` does not verify DKIM signatures itself; it relies on the provider,
+which **must remove `Authentication-Results` headers claiming its
+identifiers from incoming mail**. Use this only with such a provider. The
+topmost `Authentication-Results` must carry a listed identifier, and no other
+header may claim one. Mail is accepted when the provider reports `dkim=pass`
+for a signature whose domain is the `From` domain or a parent of it (relaxed
+alignment, without the public suffix list), and the sender is in
+`mail.trust`. SPF or DMARC passes alone are not enough.
+
+Only headers covered by the signature's `h=` are used; others are dropped.
+Signatures with a body length limit (`l=`) are rejected. The signature time
+(`t=`, otherwise the signed `Date`) is subject to `signatures.max_age`, and
+replays are recognized by the signed `Message-ID` or the signature.
+
+For forwarded mail, `arc_sealers` lists trusted forwarders. When the provider
+reports `arc=pass` and the latest ARC set is sealed by a listed domain, the
+DKIM verdict recorded by that forwarder is used instead. With DKIM
+configured, `agents mail deliver` also accepts such mail. Authenticated mail
+is handled the same way however it was authenticated.
 
 ### Optional unsigned ingress
 

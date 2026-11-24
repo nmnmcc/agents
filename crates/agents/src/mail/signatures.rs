@@ -202,21 +202,27 @@ impl Signatures {
         } else {
             bail!("mail is not signed with OpenPGP/MIME or S/MIME");
         };
-        let now = retry::now()?;
-        ensure!(
-            verified.signed_at.saturating_add(self.max_age) >= now,
-            "signature is older than signatures.max_age"
-        );
-        ensure!(
-            verified.signed_at <= now.saturating_add(SKEW),
-            "signature is from the future"
-        );
+        self.check_age(verified.signed_at)?;
         Ok(verified)
     }
 
     /// Seconds a signature remains acceptable, and so must be remembered to reject replays.
     pub fn max_age(&self) -> u64 {
         self.max_age
+    }
+
+    /// Rejects mail signed at `signed_at` that is too old or from the future.
+    pub fn check_age(&self, signed_at: u64) -> Result<()> {
+        let now = retry::now()?;
+        ensure!(
+            signed_at.saturating_add(self.max_age) >= now,
+            "signature is older than signatures.max_age"
+        );
+        ensure!(
+            signed_at <= now.saturating_add(SKEW),
+            "signature is from the future"
+        );
+        Ok(())
     }
 
     fn identity(&self, method: Method, fingerprint: &str) -> Result<MailAddress> {

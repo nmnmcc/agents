@@ -37,6 +37,8 @@ pub(super) struct ProjectMail {
     /// Monitoring recipients blind-copied on all outgoing mail.
     #[serde(default)]
     bcc: Vec<MailAddress>,
+    /// Prompt given to an agent for each new message; see the README for its context.
+    prompt: Option<Template>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -46,6 +48,8 @@ pub(super) struct AgentMail {
     address: Option<Template>,
     from: Option<Vec<AgentSelector>>,
     to: Option<Vec<AgentSelector>>,
+    /// Prompt template overriding the project default.
+    prompt: Option<Template>,
 }
 
 pub struct MailRoutes {
@@ -160,6 +164,16 @@ impl AgentMailbox {
 
     pub fn mail_directory(&self) -> &Path {
         self.project.mail_directory()
+    }
+
+    /// The configured prompt template for new messages, if any.
+    pub fn prompt(&self) -> Option<&Template> {
+        self.mail().and_then(|mail| mail.prompt.as_ref()).or(self
+            .project
+            .config
+            .mail
+            .prompt
+            .as_ref())
     }
 
     fn mail(&self) -> Option<&AgentMail> {
