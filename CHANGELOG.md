@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.3.1 (2026-11-24)
+
+### Features
+
+#### Authenticate mail by a trusted provider's DKIM and ARC verdicts
+
+`mail.transport.dkim.authserv_ids` accepts unsigned mail when a trusted mail provider reports an aligned `dkim=pass` in the topmost `Authentication-Results`, and the sender is in `mail.trust`. `arc_sealers` accepts DKIM verdicts recorded by trusted forwarders when the provider reports `arc=pass`. Only headers covered by the DKIM signature are used.
+
+The agent prompt no longer describes how the sender was authenticated; which mail is accepted is decided by configuration alone.
+
+#### Customizable mail prompt
+
+The prompt an agent receives for a new message is a template, set in `mail.prompt` or per agent in `agents.<id>.mail.prompt`. Its context has `agent`, `address` and `mail`, and the `json` filter prints indented JSON without HTML escaping.
+
+### Fixes
+
+#### Document template fields uniformly in the JSON Schema
+
+Every template and script field in `agents.schema.json` now states its context and expected result in the same `Template context:` / `Result:` form, and the `Template` and `Script` definitions describe the MiniJinja and JavaScript syntax.
+
 ## 0.3.0 (2026-11-23)
 
 ### Breaking Changes
