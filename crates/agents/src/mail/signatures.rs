@@ -96,6 +96,8 @@ pub(super) const PROTECTED: &[&str] = &[
 /// A message whose signature is valid and made by a pinned signer.
 pub(super) struct Verified {
     pub signer: MailAddress,
+    /// `openpgp` or `smime`.
+    pub method: &'static str,
     /// The signed MIME entity, including its own (possibly protected) headers.
     pub entity: Vec<u8>,
     /// Unix time the signature was made.
@@ -202,21 +204,27 @@ impl Signatures {
         } else {
             bail!("mail is not signed with OpenPGP/MIME or S/MIME");
         };
-        let now = retry::now()?;
-        ensure!(
-            verified.signed_at.saturating_add(self.max_age) >= now,
-            "signature is older than signatures.max_age"
-        );
-        ensure!(
-            verified.signed_at <= now.saturating_add(SKEW),
-            "signature is from the future"
-        );
+        self.check_age(verified.signed_at)?;
         Ok(verified)
     }
 
     /// Seconds a signature remains acceptable, and so must be remembered to reject replays.
     pub fn max_age(&self) -> u64 {
         self.max_age
+    }
+
+    /// Rejects mail signed at `signed_at` that is too old or from the future.
+    pub fn check_age(&self, signed_at: u64) -> Result<()> {
+        let now = retry::now()?;
+        ensure!(
+            signed_at.saturating_add(self.max_age) >= now,
+            "signature is older than signatures.max_age"
+        );
+        ensure!(
+            signed_at <= now.saturating_add(SKEW),
+            "signature is from the future"
+        );
+        Ok(())
     }
 
     fn identity(&self, method: Method, fingerprint: &str) -> Result<MailAddress> {
@@ -256,6 +264,7 @@ impl Signatures {
         Ok(Verified {
             receipt: receipt(fingerprint, signed_at, entity),
             signer,
+            method: "openpgp",
             entity: entity.to_vec(),
             signed_at,
         })
@@ -322,6 +331,7 @@ impl Signatures {
         Ok(Verified {
             receipt: receipt(fingerprint, signed_at, &entity),
             signer,
+            method: "smime",
             entity,
             signed_at,
         })

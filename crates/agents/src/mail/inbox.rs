@@ -12,6 +12,8 @@ use serde_json::{Value, json};
 pub(super) const LOCAL_TO: &str = "X-Agents-Local-To";
 pub(super) const LOCAL_FROM: &str = "X-Agents-Local-From";
 pub(super) const UNSIGNED: &str = "X-Agents-Local-Unsigned";
+/// How the sender was authenticated, such as `openpgp` or `dkim example.com`.
+pub(super) const AUTHENTICATION: &str = "X-Agents-Local-Authentication";
 pub(super) const INGESTED: &str = "X-Agents-Local-Imported";
 /// The daemon started an agent run for this message.
 pub(super) const DISPATCHED: &str = "AgentsDispatched";
@@ -236,6 +238,7 @@ impl<'a> Inbox<'a> {
             "mail": MailRef { uid, uid_validity: self.validity },
             "from": unique_header(message, LOCAL_FROM).ok().flatten(),
             "authenticated": !is_unsigned(message),
+            "authentication": unique_header(message, AUTHENTICATION).ok().flatten(),
             "subject": message.subject(),
             "date": message.date().map(|date| date.to_rfc3339()),
             "unread": !has("\\Seen"),

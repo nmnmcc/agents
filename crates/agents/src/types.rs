@@ -98,6 +98,10 @@ impl MailAddress {
         same_mailbox(&self.0, &other.0)
     }
 
+    pub fn domain(&self) -> &str {
+        self.0.split_once('@').expect("parsed mailbox").1
+    }
+
     pub fn routing_key(&self) -> String {
         let (local, domain) = self.0.split_once('@').expect("parsed mailbox");
         format!("{local}@{}", domain.to_ascii_lowercase())

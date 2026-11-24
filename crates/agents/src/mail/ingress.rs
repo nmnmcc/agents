@@ -1,8 +1,8 @@
 use super::{
-    MailAccess,
-    inbox::{INGESTED, LOCAL_FROM, LOCAL_TO, UNSIGNED, addresses, unique_header},
+    MailAccess, dkim,
+    inbox::{AUTHENTICATION, INGESTED, LOCAL_FROM, LOCAL_TO, UNSIGNED, addresses, unique_header},
     retry,
-    signatures::{LIMIT, PROTECTED},
+    signatures::{LIMIT, PROTECTED, Verified},
     store::{self, Folder, Query},
     transport,
 };
@@ -10,11 +10,11 @@ use crate::{
     config::{MailRoutes, Workspace},
     types::MailAddress,
 };
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use mail_parser::{MessageParser, MimeHeaders, PartType};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fmt::Write as _,
     fs::{self, OpenOptions},
     path::Path,
@@ -92,7 +92,7 @@ impl ImapIngress {
             let Some(raw) = imap.message_prefix(uid, LIMIT + 1)? else {
                 continue;
             };
-            match Letter::read(workspace, routes, None, None, &raw) {
+            match Letter::read(workspace, routes, None, Mode::Any, &raw) {
                 // A local failure leaves the message unseen to retry it.
                 Ok(letter) => letter.import(workspace)?,
                 Err(error) => {
@@ -132,7 +132,30 @@ pub fn deliver(
     raw: &[u8],
 ) -> Result<()> {
     let routes = workspace.mail_routes()?;
-    Letter::read(workspace, &routes, recipient, Some(unsigned), raw)?.import(workspace)
+    let mode = if unsigned {
+        Mode::Unsigned
+    } else {
+        Mode::Authenticated
+    };
+    Letter::read(workspace, &routes, recipient, mode, raw)?.import(workspace)
+}
+
+/// Which kinds of mail `Letter::read` accepts.
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum Mode {
+    /// Signed or DKIM-authenticated mail, and unsigned mail when that is allowed.
+    Any,
+    /// Only signed or DKIM-authenticated mail.
+    Authenticated,
+    /// Only unsigned mail, when that is allowed.
+    Unsigned,
+}
+
+/// How the sender of an accepted message was established.
+enum Origin {
+    Signed(Verified),
+    Dkim(MailAddress, dkim::Authenticated),
+    Unsigned,
 }
 
 /// An accepted incoming message and the inbox records it becomes.
@@ -142,6 +165,8 @@ struct Letter {
     /// When the receipt may be forgotten; later replays fail signature age checks.
     expires: u64,
     unsigned: bool,
+    /// How the sender was authenticated, for authenticated mail.
+    authentication: Option<String>,
     sender: MailAddress,
     recipients: Vec<MailAddress>,
     /// Headers and body of the imported message, without local routing headers.
@@ -153,7 +178,7 @@ impl Letter {
         workspace: &Workspace,
         routes: &MailRoutes,
         recipient: Option<&MailAddress>,
-        unsigned: Option<bool>,
+        mode: Mode,
         raw: &[u8],
     ) -> Result<Self> {
         ensure!(raw.len() <= LIMIT, "mail exceeds size limit");
@@ -161,35 +186,96 @@ impl Letter {
         let outer = MessageParser::default()
             .parse(raw)
             .context("invalid RFC 5322 mail")?;
-        // Without an explicit mode, mail lacking any signature takes the unsigned path.
-        let unsigned = unsigned.unwrap_or_else(|| looks_unsigned(&outer));
-        let (receipt, expires, sender, entity) = if unsigned {
-            ensure!(
-                looks_unsigned(&outer),
-                "signed or encrypted mail is never accepted as unsigned"
-            );
-            ensure!(
-                mail.dangerously_allow_unsigned,
-                "mail is unsigned and unsigned ingress is disabled \
-                 (mail.transport.dangerously_allow_unsigned)"
-            );
+        let from = || -> Result<MailAddress> {
             let [sender] = addresses(outer.from())
                 .context("invalid From")?
                 .try_into()
                 .ok()
-                .context("unsigned mail requires exactly one From mailbox")?;
-            (Sha256::digest(raw).into(), u64::MAX, sender, raw.to_vec())
+                .context("mail without a signature requires exactly one From mailbox")?;
+            Ok(sender)
+        };
+        let origin = if mode == Mode::Unsigned {
+            Origin::Unsigned
+        } else if !looks_unsigned(&outer) {
+            Origin::Signed(mail.signatures.verify(workspace.root(), raw)?)
+        } else if mail.dkim.enabled() {
+            let sender = from()?;
+            match mail.dkim.authenticate(&outer, sender.domain()) {
+                Ok(authenticated) => Origin::Dkim(sender, authenticated),
+                Err(_) if mode == Mode::Any && mail.dangerously_allow_unsigned => Origin::Unsigned,
+                Err(error) => return Err(error.context("mail is not authenticated by DKIM")),
+            }
+        } else if mode == Mode::Any {
+            Origin::Unsigned
         } else {
-            let verified = mail.signatures.verify(workspace.root(), raw)?;
-            let expires = verified.signed_at.saturating_add(mail.signatures.max_age());
-            (verified.receipt, expires, verified.signer, verified.entity)
+            bail!("mail is not signed with OpenPGP/MIME or S/MIME and DKIM is not configured")
+        };
+        let unsigned = matches!(origin, Origin::Unsigned);
+        // Headers a DKIM signature does not cover are not authenticated and are dropped.
+        let covered: Option<BTreeSet<String>> = match &origin {
+            Origin::Dkim(_, authenticated) => Some(authenticated.covered.clone()),
+            _ => None,
+        };
+        let trusted = |name: &str| {
+            covered
+                .as_ref()
+                .is_none_or(|covered| covered.contains(&name.to_ascii_lowercase()))
+        };
+        let (receipt, expires, sender, entity, authentication) = match origin {
+            Origin::Unsigned => {
+                ensure!(
+                    looks_unsigned(&outer),
+                    "signed or encrypted mail is never accepted as unsigned"
+                );
+                ensure!(
+                    mail.dangerously_allow_unsigned,
+                    "mail is unsigned and unsigned ingress is disabled \
+                     (mail.transport.dangerously_allow_unsigned)"
+                );
+                let sender = from()?;
+                (
+                    Sha256::digest(raw).into(),
+                    u64::MAX,
+                    sender,
+                    raw.to_vec(),
+                    None,
+                )
+            }
+            Origin::Signed(verified) => (
+                verified.receipt,
+                verified.signed_at.saturating_add(mail.signatures.max_age()),
+                verified.signer,
+                verified.entity,
+                Some(verified.method.to_owned()),
+            ),
+            Origin::Dkim(sender, authenticated) => {
+                let signed_at = match authenticated.signed_at {
+                    Some(time) => time,
+                    None if trusted("Date") => outer
+                        .date()
+                        .and_then(|date| u64::try_from(date.to_timestamp()).ok())
+                        .context("DKIM-authenticated mail has no valid Date")?,
+                    None => bail!("DKIM signature has no timestamp and does not cover Date"),
+                };
+                mail.signatures.check_age(signed_at)?;
+                let mut digest = Sha256::new();
+                digest.update(b"dkim\0");
+                digest.update(&authenticated.signature);
+                (
+                    digest.finalize().into(),
+                    signed_at.saturating_add(mail.signatures.max_age()),
+                    sender,
+                    raw.to_vec(),
+                    Some(authenticated.describe()),
+                )
+            }
         };
         let inner = MessageParser::default()
             .parse(&entity)
             .context("invalid signed MIME entity")?;
         // A signed Message-ID names the message even when the sender re-signs it to retry.
         let receipt = match unique_header(&inner, "Message-ID")? {
-            Some(id) if !unsigned => {
+            Some(id) if !unsigned && trusted("Message-ID") => {
                 let mut digest = Sha256::new();
                 digest.update(sender.routing_key());
                 digest.update([0]);
@@ -199,6 +285,9 @@ impl Letter {
             _ => receipt,
         };
         let header = |name: &str| -> Option<String> {
+            if !trusted(name) {
+                return None;
+            }
             let find = |message: &mail_parser::Message<'_>| {
                 message
                     .headers_raw()
@@ -214,7 +303,8 @@ impl Letter {
         };
         let protected_recipients = !unsigned
             && inner.headers_raw().any(|(name, _)| {
-                name.eq_ignore_ascii_case("To") || name.eq_ignore_ascii_case("Cc")
+                (name.eq_ignore_ascii_case("To") || name.eq_ignore_ascii_case("Cc"))
+                    && trusted(name)
             });
         let mut message = format!("From: {sender}\r\n");
         for name in PROTECTED.iter().filter(|name| **name != "From") {
@@ -277,9 +367,11 @@ impl Letter {
             {
                 continue;
             }
+            // Pinned signers are trusted by configuration; a DKIM domain vouches for anyone
+            // with a mailbox there, so those senders must be listed in mail.trust.
             if MailAccess::new(mail, routes, mailbox)?
                 .incoming
-                .allows(&sender, true)
+                .allows(&sender, covered.is_none())
             {
                 recipients.push(mailbox.address().clone());
             } else {
@@ -294,6 +386,7 @@ impl Letter {
             receipt,
             expires,
             unsigned,
+            authentication,
             sender,
             recipients,
             message: crlf(&record),
@@ -327,6 +420,9 @@ impl Letter {
             );
             if self.unsigned {
                 record.push_str(&format!("{UNSIGNED}: yes\r\n"));
+            }
+            if let Some(authentication) = &self.authentication {
+                record.push_str(&format!("{AUTHENTICATION}: {authentication}\r\n"));
             }
             let mut record = record.into_bytes();
             record.extend_from_slice(&self.message);

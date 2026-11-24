@@ -3,6 +3,7 @@
 import argparse
 import email
 import email.policy
+import email.utils
 import grp
 import imaplib
 import json
@@ -564,6 +565,60 @@ def test(binary, imap_port):
             build.write_text(json.dumps(configuration))
             assert not search(build, "Anonymous task")
             assert not cli(build, "--once").stdout
+
+            # A trusted provider's DKIM verdict authenticates ordinary mail.
+            configuration["mail"]["transport"]["dkim"] = {
+                "authserv_ids": ["mx.provider.test"]
+            }
+            build.write_text(json.dumps(configuration))
+
+            def provider(id, body, verdicts):
+                stamp = int(time.time())
+                return (
+                    "".join(
+                        f"Authentication-Results: {verdict}\r\n" for verdict in verdicts
+                    )
+                    + "DKIM-Signature: v=1; a=rsa-sha256; d=example.test; s=mail;"
+                    f" h=from:to:subject:date:message-id; t={stamp}; bh=AAAA;"
+                    " b=DkimProof1234567890\r\n"
+                    f"Date: {email.utils.formatdate()}\r\n"
+                ).encode() + job(BUILDER, id, body)
+
+            passed = (
+                "mx.provider.test; dkim=pass header.d=example.test header.b=DkimProof1"
+            )
+            forged = [
+                # A verdict from a server the provider does not vouch for.
+                provider(
+                    "dkim-forged", "Forged verdict", ["mx.evil.test; " + passed[18:]]
+                ),
+                # A sender-supplied verdict below the provider's own failing one.
+                provider(
+                    "dkim-buried",
+                    "Buried verdict",
+                    ["mx.provider.test; dkim=fail header.d=example.test", passed],
+                ),
+            ]
+            for message in forged:
+                append(imap_port, "build", message)
+            append(imap_port, "build", provider("dkim", "DKIM task", [passed]))
+            assert cli(build, "--once").stdout.count(b"handled") == 1
+            (dkim,) = search(build, "DKIM task")
+            assert dkim["authenticated"] and dkim["from"] == HUMAN
+            assert dkim["authentication"] == "dkim example.test"
+            assert not search(build, "Forged verdict")
+            assert not search(build, "Buried verdict")
+            with imap_login(imap_port) as connection:
+                connection.select("build")
+                rejected = connection.search(None, "KEYWORD", "AgentsRejected")[1]
+                assert len(rejected[0].split()) == 7, rejected
+            # Without the provider's verdict, the same mail cannot be delivered.
+            mail(
+                build,
+                "deliver",
+                task=provider("dkim-local", "Local", ["mx.evil.test; " + passed[18:]]),
+                success=False,
+            )
 
             # Standard mail to a +tag address reaches that agent.
             editor_task = signed(

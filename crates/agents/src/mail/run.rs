@@ -129,7 +129,22 @@ fn trust(mail: &Value) -> String {
     let summary = &mail["message"];
     let from = summary["from"].as_str().unwrap_or("unknown");
     if summary["authenticated"].as_bool() == Some(true) {
-        format!("Its sender {from} is authenticated by a pinned signature.")
+        let words: Vec<&str> = summary["authentication"]
+            .as_str()
+            .unwrap_or_default()
+            .split(' ')
+            .collect();
+        match words.as_slice() {
+            ["dkim", domain] => format!(
+                "Its sender {from} is authenticated by a DKIM signature of {domain}, \
+                 verified by the mail provider."
+            ),
+            ["arc", sealer, "dkim", domain] => format!(
+                "Its sender {from} is authenticated by a DKIM signature of {domain}, \
+                 as reported by the trusted forwarder {sealer}."
+            ),
+            _ => format!("Its sender {from} is authenticated by a pinned signature."),
+        }
     } else {
         format!(
             "Its sender is UNAUTHENTICATED: the message claims to be from {from}, \

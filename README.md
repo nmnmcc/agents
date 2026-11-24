@@ -287,6 +287,42 @@ home: "/path/to/private/gnupg-home" }`. Protect private files and make sure
 the service can sign without an interactive prompt. Non-Nix installations
 need GnuPG for OpenPGP and the OpenSSL CLI for S/MIME on `PATH`.
 
+### DKIM and ARC through a trusted provider
+
+Mail from ordinary webmail and clients that do not sign can be authenticated
+by the DKIM verdict of the receiving mail provider:
+
+```json
+"transport": {
+  "dkim": {
+    "authserv_ids": ["mx.example.com"],
+    "arc_sealers": ["google.com"]
+  }
+}
+```
+
+`authserv_ids` lists the provider's identifiers in `Authentication-Results`.
+`agents` does not verify DKIM signatures itself; it relies on the provider,
+which **must remove `Authentication-Results` headers claiming its
+identifiers from incoming mail**. Use this only with such a provider. The
+topmost `Authentication-Results` must carry a listed identifier, and no other
+header may claim one. Mail is accepted when the provider reports `dkim=pass`
+for a signature whose domain is the `From` domain or a parent of it (relaxed
+alignment, without the public suffix list), and the sender is in
+`mail.trust`. SPF or DMARC passes alone are not enough.
+
+Only headers covered by the signature's `h=` are used; others are dropped.
+Signatures with a body length limit (`l=`) are rejected. The signature time
+(`t=`, otherwise the signed `Date`) is subject to `signatures.max_age`, and
+replays are recognized by the signed `Message-ID` or the signature.
+
+For forwarded mail, `arc_sealers` lists trusted forwarders. When the provider
+reports `arc=pass` and the latest ARC set is sealed by a listed domain, the
+DKIM verdict recorded by that forwarder is used instead. With DKIM
+configured, `agents mail deliver` also accepts such mail. The prompt and
+`authentication` field (`dkim <domain>` or `arc <sealer> dkim <domain>`) show
+how the sender was authenticated.
+
 ### Optional unsigned ingress
 
 `mail.transport.dangerously_allow_unsigned: true` permits unsigned IMAP mail

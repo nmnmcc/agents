@@ -93,6 +93,48 @@
       },
       "additionalProperties": false
     },
+    "Dkim": {
+      "type": "object",
+      "properties": {
+        "arc_sealers": {
+          "description": "Domains whose ARC seal is trusted to report DKIM results of mail they forward,\nsuch as mailing lists whose changes break the original DKIM signature.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "$ref": "#/$defs/EnvReference"
+              },
+              {
+                "$ref": "#/$defs/FileReference"
+              }
+            ]
+          }
+        },
+        "authserv_ids": {
+          "description": "authserv-ids your mail provider writes into `Authentication-Results`, such as\n`mx.google.com`. Mail with an aligned DKIM pass from one of them is authenticated.\nThe provider must remove headers claiming these ids from incoming mail (RFC 8601).",
+          "type": "array",
+          "default": [],
+          "items": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "$ref": "#/$defs/EnvReference"
+              },
+              {
+                "$ref": "#/$defs/FileReference"
+              }
+            ]
+          }
+        }
+      },
+      "additionalProperties": false
+    },
     "Endpoint": {
       "type": "object",
       "properties": {
@@ -539,6 +581,10 @@
           "description": "Accept unsigned mail. Anyone who can deliver mail to the inbox can forge\nFrom, Reply-To, or thread headers to impersonate a trusted sender,\nredirect replies, or resume an existing agent session.",
           "type": "boolean",
           "default": false
+        },
+        "dkim": {
+          "description": "Authenticate mail by the DKIM and ARC verdicts of a trusted mail provider.",
+          "$ref": "#/$defs/Dkim"
         },
         "imap": {
           "description": "Ordinary IMAP inbox to poll for incoming jobs.",
@@ -1444,6 +1490,49 @@
                   "description": "Accept unsigned mail. Anyone who can deliver mail to the inbox can forge\nFrom, Reply-To, or thread headers to impersonate a trusted sender,\nredirect replies, or resume an existing agent session.",
                   "type": "boolean",
                   "default": false
+                },
+                "dkim": {
+                  "description": "Authenticate mail by the DKIM and ARC verdicts of a trusted mail provider.",
+                  "type": "object",
+                  "properties": {
+                    "arc_sealers": {
+                      "description": "Domains whose ARC seal is trusted to report DKIM results of mail they forward,\nsuch as mailing lists whose changes break the original DKIM signature.",
+                      "type": "array",
+                      "default": [],
+                      "items": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "$ref": "#/$defs/EnvReference"
+                          },
+                          {
+                            "$ref": "#/$defs/FileReference"
+                          }
+                        ]
+                      }
+                    },
+                    "authserv_ids": {
+                      "description": "authserv-ids your mail provider writes into `Authentication-Results`, such as\n`mx.google.com`. Mail with an aligned DKIM pass from one of them is authenticated.\nThe provider must remove headers claiming these ids from incoming mail (RFC 8601).",
+                      "type": "array",
+                      "default": [],
+                      "items": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "$ref": "#/$defs/EnvReference"
+                          },
+                          {
+                            "$ref": "#/$defs/FileReference"
+                          }
+                        ]
+                      }
+                    }
+                  },
+                  "additionalProperties": false
                 },
                 "imap": {
                   "description": "Ordinary IMAP inbox to poll for incoming jobs.",
