@@ -454,8 +454,11 @@ environment overrides, and generated files apply only to that invocation;
 projects and adapters: `agents` is not a sandbox.
 
 Every templated value (arguments, environment overrides, generated files,
-`stdin`, hook commands, and mail addresses) is either a
-MiniJinja string or `{ "js": "..." }`. JavaScript runs in a fresh QuickJS
+`stdin`, hook commands, mail addresses and the mail prompt) is either a
+MiniJinja string or `{ "js": "..." }`. MiniJinja rejects undefined variables,
+does not escape output, and has a `json` filter for indented JSON. The JSON
+Schema describes each field's context and expected result in the same
+`Template context:` / `Result:` form. JavaScript runs in a fresh QuickJS
 context with no I/O and with memory, stack, and time limits. The template
 context is available as global variables, and the value of the last statement
 is the result. An argument script may return an array of arguments or `null`
