@@ -19,7 +19,10 @@ use std::{
 pub(super) struct ProjectMail {
     /// Optional root for discovering mail identities, relative to this project.
     workspace: Option<PathBuf>,
-    /// Default address template for agents in this project.
+    /// Default mail address for agents in this project.
+    ///
+    /// Template context: `project` (`name`, `path`) and `agent` (`id`).
+    /// Result: a mail address.
     address: Option<Template>,
     /// Where local mbox files are stored, relative to the project.
     directory: Option<RelativePath>,
@@ -37,18 +40,28 @@ pub(super) struct ProjectMail {
     /// Monitoring recipients blind-copied on all outgoing mail.
     #[serde(default)]
     bcc: Vec<MailAddress>,
-    /// Prompt given to an agent for each new message; see the README for its context.
+    /// Prompt given to an agent for each new message.
+    ///
+    /// Template context: `agent` (`id`, `description`, `instructions`), `address`
+    /// and `mail`, the message as `agents mail get` prints it.
+    /// Result: a string.
     prompt: Option<Template>,
 }
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(super) struct AgentMail {
-    /// Address template overriding the project default.
+    /// Mail address of this agent, overriding `mail.address`.
+    ///
+    /// Template context: as for `mail.address`.
+    /// Result: a mail address.
     address: Option<Template>,
     from: Option<Vec<AgentSelector>>,
     to: Option<Vec<AgentSelector>>,
-    /// Prompt template overriding the project default.
+    /// Prompt for each new message, overriding `mail.prompt`.
+    ///
+    /// Template context: as for `mail.prompt`.
+    /// Result: a string.
     prompt: Option<Template>,
 }
 

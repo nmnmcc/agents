@@ -11,7 +11,7 @@
       "type": "object",
       "properties": {
         "address": {
-          "description": "Address template overriding the project default.",
+          "description": "Mail address of this agent, overriding `mail.address`.\n\nTemplate context: as for `mail.address`.\nResult: a mail address.",
           "anyOf": [
             {
               "$ref": "#/$defs/Template"
@@ -31,7 +31,7 @@
           }
         },
         "prompt": {
-          "description": "Prompt template overriding the project default.",
+          "description": "Prompt for each new message, overriding `mail.prompt`.\n\nTemplate context: as for `mail.prompt`.\nResult: a string.",
           "anyOf": [
             {
               "$ref": "#/$defs/Template"
@@ -75,7 +75,7 @@
           "$ref": "#/$defs/Format"
         },
         "template": {
-          "description": "JavaScript may return any JSON value for a `json` file.",
+          "description": "Contents of the generated file.\n\nTemplate context: `program`, `agent`, `project_instructions`, `mcp`, `skills`, `paths`, `model`, `session`.\nResult: a string; a script may return any JSON value for a `json` file.",
           "$ref": "#/$defs/Template"
         }
       },
@@ -179,7 +179,7 @@
       ]
     },
     "Env": {
-      "description": "Child-only environment overrides: a map whose `null` values remove inherited\nvariables, or a script that returns such a map.",
+      "description": "Environment overrides for the harness and its hooks only: a map from\nvariable name to a template, where null removes an inherited variable, or\na script that returns such a map.\n\nTemplate context: `program`, `agent`, `project_instructions`, `mcp`, `skills`, `paths`, `model`, `session`.\nResult: a string, or null to remove the variable.",
       "anyOf": [
         {
           "$ref": "#/$defs/Script"
@@ -269,6 +269,7 @@
       "type": "object",
       "properties": {
         "args": {
+          "description": "Arguments, rendered one by one without a shell.\n\nTemplate context: `program`, `agent`, `project_instructions`, `mcp`, `skills`, `paths`, `model`, `session`.\nResult: a string; a script may also return an array of strings, or null for none.",
           "type": "array",
           "items": {
             "$ref": "#/$defs/Template"
@@ -297,7 +298,7 @@
           "$ref": "#/$defs/Program"
         },
         "stdin": {
-          "description": "Renders the harness input from `task`.",
+          "description": "Standard input of the harness. Omit it to pass the task unchanged.\n\nTemplate context: `task`.\nResult: a string.",
           "anyOf": [
             {
               "$ref": "#/$defs/Template"
@@ -319,7 +320,7 @@
       "type": "object",
       "properties": {
         "after": {
-          "description": "Commands run in order after the harness exits, with its exit code as\n`status` (null if killed by a signal); any failure fails the run.",
+          "description": "Commands run in order after the harness exits; any failure fails the run.\nEach is an argument list whose first element is the program, rendered like `args`.\n\nTemplate context: `program`, `agent`, `project_instructions`, `mcp`, `skills`, `paths`, `model`, `session`, and `status`, the exit code (null if killed by a signal).\nResult: as for `args`.",
           "type": "array",
           "items": {
             "type": "array",
@@ -329,7 +330,7 @@
           }
         },
         "before": {
-          "description": "Commands run in order before the harness starts; any failure aborts the run.",
+          "description": "Commands run in order before the harness starts; any failure aborts the run.\nEach is an argument list whose first element is the program, rendered like `args`.\n\nTemplate context: `program`, `agent`, `project_instructions`, `mcp`, `skills`, `paths`, `model`, `session`.\nResult: as for `args`.",
           "type": "array",
           "items": {
             "type": "array",
@@ -339,7 +340,7 @@
           }
         },
         "stderr": {
-          "description": "Script run on each line of harness stderr.",
+          "description": "Runs on each line of harness stderr.\n\nScript context: `program`, `agent`, `project_instructions`, `mcp`, `skills`, `paths`, `model`, `session`, `stream` and `line`.\nResult: as for `stdout`.",
           "anyOf": [
             {
               "$ref": "#/$defs/Script"
@@ -350,7 +351,7 @@
           ]
         },
         "stdout": {
-          "description": "Script run on each line of harness stdout.",
+          "description": "Runs on each line of harness stdout.\n\nScript context: `program`, `agent`, `project_instructions`, `mcp`, `skills`, `paths`, `model`, `session`, `stream` and `line`.\nResult: null keeps the line, or an object whose `line` replaces it (null drops\nit) and whose `session` reports a native session ID.",
           "anyOf": [
             {
               "$ref": "#/$defs/Script"
@@ -957,16 +958,16 @@
                   ],
                   "properties": {
                     "address": {
-                      "description": "Address template overriding the project default.",
+                      "description": "Mail address of this agent, overriding `mail.address`.\n\nTemplate context: as for `mail.address`.\nResult: a mail address.",
                       "anyOf": [
                         {
-                          "description": "MiniJinja text, or `{\"js\": \"...\"}`.",
+                          "description": "A template: MiniJinja text, or a `{\"js\": \"...\"}` script.\n\nMiniJinja treats undefined variables as errors, does not escape output, and\nadds a `json` filter that prints a value as indented JSON. A script sees the\ncontext as global variables and returns the value of its last statement.\nEach templated field states its context and the result it expects.",
                           "anyOf": [
                             {
                               "type": "string"
                             },
                             {
-                              "description": "JavaScript run in QuickJS with no I/O. The template context is exposed as\nglobal variables; the value of the last statement is the result. Output hooks\nkeep `globalThis` for the whole run; other scripts start from a fresh context.",
+                              "description": "A script: `{\"js\": \"...\"}`, JavaScript run in QuickJS with no I/O and with\nmemory, stack and time limits.\n\nThe context is exposed as global variables, and the value of the last\nstatement is the result. Output hooks keep `globalThis` for the whole run;\nother scripts start from a fresh context.",
                               "type": "object",
                               "properties": {
                                 "js": {
@@ -994,16 +995,16 @@
                       }
                     },
                     "prompt": {
-                      "description": "Prompt template overriding the project default.",
+                      "description": "Prompt for each new message, overriding `mail.prompt`.\n\nTemplate context: as for `mail.prompt`.\nResult: a string.",
                       "anyOf": [
                         {
-                          "description": "MiniJinja text, or `{\"js\": \"...\"}`.",
+                          "description": "A template: MiniJinja text, or a `{\"js\": \"...\"}` script.\n\nMiniJinja treats undefined variables as errors, does not escape output, and\nadds a `json` filter that prints a value as indented JSON. A script sees the\ncontext as global variables and returns the value of its last statement.\nEach templated field states its context and the result it expects.",
                           "anyOf": [
                             {
                               "type": "string"
                             },
                             {
-                              "description": "JavaScript run in QuickJS with no I/O. The template context is exposed as\nglobal variables; the value of the last statement is the result. Output hooks\nkeep `globalThis` for the whole run; other scripts start from a fresh context.",
+                              "description": "A script: `{\"js\": \"...\"}`, JavaScript run in QuickJS with no I/O and with\nmemory, stack and time limits.\n\nThe context is exposed as global variables, and the value of the last\nstatement is the result. Output hooks keep `globalThis` for the whole run;\nother scripts start from a fresh context.",
                               "type": "object",
                               "properties": {
                                 "js": {
@@ -1083,15 +1084,16 @@
               "type": "object",
               "properties": {
                 "args": {
+                  "description": "Arguments, rendered one by one without a shell.\n\nTemplate context: `program`, `agent`, `project_instructions`, `mcp`, `skills`, `paths`, `model`, `session`.\nResult: a string; a script may also return an array of strings, or null for none.",
                   "type": "array",
                   "items": {
-                    "description": "MiniJinja text, or `{\"js\": \"...\"}`.",
+                    "description": "A template: MiniJinja text, or a `{\"js\": \"...\"}` script.\n\nMiniJinja treats undefined variables as errors, does not escape output, and\nadds a `json` filter that prints a value as indented JSON. A script sees the\ncontext as global variables and returns the value of its last statement.\nEach templated field states its context and the result it expects.",
                     "anyOf": [
                       {
                         "type": "string"
                       },
                       {
-                        "description": "JavaScript run in QuickJS with no I/O. The template context is exposed as\nglobal variables; the value of the last statement is the result. Output hooks\nkeep `globalThis` for the whole run; other scripts start from a fresh context.",
+                        "description": "A script: `{\"js\": \"...\"}`, JavaScript run in QuickJS with no I/O and with\nmemory, stack and time limits.\n\nThe context is exposed as global variables, and the value of the last\nstatement is the result. Output hooks keep `globalThis` for the whole run;\nother scripts start from a fresh context.",
                         "type": "object",
                         "properties": {
                           "js": {
@@ -1146,10 +1148,10 @@
                   "additionalProperties": false
                 },
                 "env": {
-                  "description": "Child-only environment overrides: a map whose `null` values remove inherited\nvariables, or a script that returns such a map.",
+                  "description": "Environment overrides for the harness and its hooks only: a map from\nvariable name to a template, where null removes an inherited variable, or\na script that returns such a map.\n\nTemplate context: `program`, `agent`, `project_instructions`, `mcp`, `skills`, `paths`, `model`, `session`.\nResult: a string, or null to remove the variable.",
                   "anyOf": [
                     {
-                      "description": "JavaScript run in QuickJS with no I/O. The template context is exposed as\nglobal variables; the value of the last statement is the result. Output hooks\nkeep `globalThis` for the whole run; other scripts start from a fresh context.",
+                      "description": "A script: `{\"js\": \"...\"}`, JavaScript run in QuickJS with no I/O and with\nmemory, stack and time limits.\n\nThe context is exposed as global variables, and the value of the last\nstatement is the result. Output hooks keep `globalThis` for the whole run;\nother scripts start from a fresh context.",
                       "type": "object",
                       "properties": {
                         "js": {
@@ -1165,13 +1167,13 @@
                         "^[A-Za-z_][A-Za-z0-9_]*$(?![\\s\\S])": {
                           "anyOf": [
                             {
-                              "description": "MiniJinja text, or `{\"js\": \"...\"}`.",
+                              "description": "A template: MiniJinja text, or a `{\"js\": \"...\"}` script.\n\nMiniJinja treats undefined variables as errors, does not escape output, and\nadds a `json` filter that prints a value as indented JSON. A script sees the\ncontext as global variables and returns the value of its last statement.\nEach templated field states its context and the result it expects.",
                               "anyOf": [
                                 {
                                   "type": "string"
                                 },
                                 {
-                                  "description": "JavaScript run in QuickJS with no I/O. The template context is exposed as\nglobal variables; the value of the last statement is the result. Output hooks\nkeep `globalThis` for the whole run; other scripts start from a fresh context.",
+                                  "description": "A script: `{\"js\": \"...\"}`, JavaScript run in QuickJS with no I/O and with\nmemory, stack and time limits.\n\nThe context is exposed as global variables, and the value of the last\nstatement is the result. Output hooks keep `globalThis` for the whole run;\nother scripts start from a fresh context.",
                                   "type": "object",
                                   "properties": {
                                     "js": {
@@ -1206,13 +1208,13 @@
                           ]
                         },
                         "template": {
-                          "description": "JavaScript may return any JSON value for a `json` file.",
+                          "description": "Contents of the generated file.\n\nTemplate context: `program`, `agent`, `project_instructions`, `mcp`, `skills`, `paths`, `model`, `session`.\nResult: a string; a script may return any JSON value for a `json` file.",
                           "anyOf": [
                             {
                               "type": "string"
                             },
                             {
-                              "description": "JavaScript run in QuickJS with no I/O. The template context is exposed as\nglobal variables; the value of the last statement is the result. Output hooks\nkeep `globalThis` for the whole run; other scripts start from a fresh context.",
+                              "description": "A script: `{\"js\": \"...\"}`, JavaScript run in QuickJS with no I/O and with\nmemory, stack and time limits.\n\nThe context is exposed as global variables, and the value of the last\nstatement is the result. Output hooks keep `globalThis` for the whole run;\nother scripts start from a fresh context.",
                               "type": "object",
                               "properties": {
                                 "js": {
@@ -1233,18 +1235,18 @@
                   "type": "object",
                   "properties": {
                     "after": {
-                      "description": "Commands run in order after the harness exits, with its exit code as\n`status` (null if killed by a signal); any failure fails the run.",
+                      "description": "Commands run in order after the harness exits; any failure fails the run.\nEach is an argument list whose first element is the program, rendered like `args`.\n\nTemplate context: `program`, `agent`, `project_instructions`, `mcp`, `skills`, `paths`, `model`, `session`, and `status`, the exit code (null if killed by a signal).\nResult: as for `args`.",
                       "type": "array",
                       "items": {
                         "type": "array",
                         "items": {
-                          "description": "MiniJinja text, or `{\"js\": \"...\"}`.",
+                          "description": "A template: MiniJinja text, or a `{\"js\": \"...\"}` script.\n\nMiniJinja treats undefined variables as errors, does not escape output, and\nadds a `json` filter that prints a value as indented JSON. A script sees the\ncontext as global variables and returns the value of its last statement.\nEach templated field states its context and the result it expects.",
                           "anyOf": [
                             {
                               "type": "string"
                             },
                             {
-                              "description": "JavaScript run in QuickJS with no I/O. The template context is exposed as\nglobal variables; the value of the last statement is the result. Output hooks\nkeep `globalThis` for the whole run; other scripts start from a fresh context.",
+                              "description": "A script: `{\"js\": \"...\"}`, JavaScript run in QuickJS with no I/O and with\nmemory, stack and time limits.\n\nThe context is exposed as global variables, and the value of the last\nstatement is the result. Output hooks keep `globalThis` for the whole run;\nother scripts start from a fresh context.",
                               "type": "object",
                               "properties": {
                                 "js": {
@@ -1258,18 +1260,18 @@
                       }
                     },
                     "before": {
-                      "description": "Commands run in order before the harness starts; any failure aborts the run.",
+                      "description": "Commands run in order before the harness starts; any failure aborts the run.\nEach is an argument list whose first element is the program, rendered like `args`.\n\nTemplate context: `program`, `agent`, `project_instructions`, `mcp`, `skills`, `paths`, `model`, `session`.\nResult: as for `args`.",
                       "type": "array",
                       "items": {
                         "type": "array",
                         "items": {
-                          "description": "MiniJinja text, or `{\"js\": \"...\"}`.",
+                          "description": "A template: MiniJinja text, or a `{\"js\": \"...\"}` script.\n\nMiniJinja treats undefined variables as errors, does not escape output, and\nadds a `json` filter that prints a value as indented JSON. A script sees the\ncontext as global variables and returns the value of its last statement.\nEach templated field states its context and the result it expects.",
                           "anyOf": [
                             {
                               "type": "string"
                             },
                             {
-                              "description": "JavaScript run in QuickJS with no I/O. The template context is exposed as\nglobal variables; the value of the last statement is the result. Output hooks\nkeep `globalThis` for the whole run; other scripts start from a fresh context.",
+                              "description": "A script: `{\"js\": \"...\"}`, JavaScript run in QuickJS with no I/O and with\nmemory, stack and time limits.\n\nThe context is exposed as global variables, and the value of the last\nstatement is the result. Output hooks keep `globalThis` for the whole run;\nother scripts start from a fresh context.",
                               "type": "object",
                               "properties": {
                                 "js": {
@@ -1283,7 +1285,7 @@
                       }
                     },
                     "stderr": {
-                      "description": "Script run on each line of harness stderr.",
+                      "description": "Runs on each line of harness stderr.\n\nScript context: `program`, `agent`, `project_instructions`, `mcp`, `skills`, `paths`, `model`, `session`, `stream` and `line`.\nResult: as for `stdout`.",
                       "type": [
                         "object",
                         "null"
@@ -1296,7 +1298,7 @@
                       "additionalProperties": false
                     },
                     "stdout": {
-                      "description": "Script run on each line of harness stdout.",
+                      "description": "Runs on each line of harness stdout.\n\nScript context: `program`, `agent`, `project_instructions`, `mcp`, `skills`, `paths`, `model`, `session`, `stream` and `line`.\nResult: null keeps the line, or an object whose `line` replaces it (null drops\nit) and whose `session` reports a native session ID.",
                       "type": [
                         "object",
                         "null"
@@ -1321,16 +1323,16 @@
                   }
                 },
                 "stdin": {
-                  "description": "Renders the harness input from `task`.",
+                  "description": "Standard input of the harness. Omit it to pass the task unchanged.\n\nTemplate context: `task`.\nResult: a string.",
                   "anyOf": [
                     {
-                      "description": "MiniJinja text, or `{\"js\": \"...\"}`.",
+                      "description": "A template: MiniJinja text, or a `{\"js\": \"...\"}` script.\n\nMiniJinja treats undefined variables as errors, does not escape output, and\nadds a `json` filter that prints a value as indented JSON. A script sees the\ncontext as global variables and returns the value of its last statement.\nEach templated field states its context and the result it expects.",
                       "anyOf": [
                         {
                           "type": "string"
                         },
                         {
-                          "description": "JavaScript run in QuickJS with no I/O. The template context is exposed as\nglobal variables; the value of the last statement is the result. Output hooks\nkeep `globalThis` for the whole run; other scripts start from a fresh context.",
+                          "description": "A script: `{\"js\": \"...\"}`, JavaScript run in QuickJS with no I/O and with\nmemory, stack and time limits.\n\nThe context is exposed as global variables, and the value of the last\nstatement is the result. Output hooks keep `globalThis` for the whole run;\nother scripts start from a fresh context.",
                           "type": "object",
                           "properties": {
                             "js": {
@@ -1372,10 +1374,10 @@
           "type": "object",
           "properties": {
             "address": {
-              "description": "Default address template for agents in this project.",
+              "description": "Default mail address for agents in this project.\n\nTemplate context: `project` (`name`, `path`) and `agent` (`id`).\nResult: a mail address.",
               "anyOf": [
                 {
-                  "description": "MiniJinja text, or `{\"js\": \"...\"}`.",
+                  "description": "A template: MiniJinja text, or a `{\"js\": \"...\"}` script.\n\nMiniJinja treats undefined variables as errors, does not escape output, and\nadds a `json` filter that prints a value as indented JSON. A script sees the\ncontext as global variables and returns the value of its last statement.\nEach templated field states its context and the result it expects.",
                   "anyOf": [
                     {
                       "anyOf": [
@@ -1391,7 +1393,7 @@
                       ]
                     },
                     {
-                      "description": "JavaScript run in QuickJS with no I/O. The template context is exposed as\nglobal variables; the value of the last statement is the result. Output hooks\nkeep `globalThis` for the whole run; other scripts start from a fresh context.",
+                      "description": "A script: `{\"js\": \"...\"}`, JavaScript run in QuickJS with no I/O and with\nmemory, stack and time limits.\n\nThe context is exposed as global variables, and the value of the last\nstatement is the result. Output hooks keep `globalThis` for the whole run;\nother scripts start from a fresh context.",
                       "type": "object",
                       "properties": {
                         "js": {
@@ -1499,10 +1501,10 @@
               }
             },
             "prompt": {
-              "description": "Prompt given to an agent for each new message; see the README for its context.",
+              "description": "Prompt given to an agent for each new message.\n\nTemplate context: `agent` (`id`, `description`, `instructions`), `address`\nand `mail`, the message as `agents mail get` prints it.\nResult: a string.",
               "anyOf": [
                 {
-                  "description": "MiniJinja text, or `{\"js\": \"...\"}`.",
+                  "description": "A template: MiniJinja text, or a `{\"js\": \"...\"}` script.\n\nMiniJinja treats undefined variables as errors, does not escape output, and\nadds a `json` filter that prints a value as indented JSON. A script sees the\ncontext as global variables and returns the value of its last statement.\nEach templated field states its context and the result it expects.",
                   "anyOf": [
                     {
                       "anyOf": [
@@ -1518,7 +1520,7 @@
                       ]
                     },
                     {
-                      "description": "JavaScript run in QuickJS with no I/O. The template context is exposed as\nglobal variables; the value of the last statement is the result. Output hooks\nkeep `globalThis` for the whole run; other scripts start from a fresh context.",
+                      "description": "A script: `{\"js\": \"...\"}`, JavaScript run in QuickJS with no I/O and with\nmemory, stack and time limits.\n\nThe context is exposed as global variables, and the value of the last\nstatement is the result. Output hooks keep `globalThis` for the whole run;\nother scripts start from a fresh context.",
                       "type": "object",
                       "properties": {
                         "js": {
@@ -2318,7 +2320,7 @@
       "type": "object",
       "properties": {
         "address": {
-          "description": "Default address template for agents in this project.",
+          "description": "Default mail address for agents in this project.\n\nTemplate context: `project` (`name`, `path`) and `agent` (`id`).\nResult: a mail address.",
           "anyOf": [
             {
               "$ref": "#/$defs/Template"
@@ -2366,7 +2368,7 @@
           }
         },
         "prompt": {
-          "description": "Prompt given to an agent for each new message; see the README for its context.",
+          "description": "Prompt given to an agent for each new message.\n\nTemplate context: `agent` (`id`, `description`, `instructions`), `address`\nand `mail`, the message as `agents mail get` prints it.\nResult: a string.",
           "anyOf": [
             {
               "$ref": "#/$defs/Template"
@@ -2503,7 +2505,7 @@
       ]
     },
     "Script": {
-      "description": "JavaScript run in QuickJS with no I/O. The template context is exposed as\nglobal variables; the value of the last statement is the result. Output hooks\nkeep `globalThis` for the whole run; other scripts start from a fresh context.",
+      "description": "A script: `{\"js\": \"...\"}`, JavaScript run in QuickJS with no I/O and with\nmemory, stack and time limits.\n\nThe context is exposed as global variables, and the value of the last\nstatement is the result. Output hooks keep `globalThis` for the whole run;\nother scripts start from a fresh context.",
       "type": "object",
       "properties": {
         "js": {
@@ -2968,7 +2970,7 @@
       ]
     },
     "Template": {
-      "description": "MiniJinja text, or `{\"js\": \"...\"}`.",
+      "description": "A template: MiniJinja text, or a `{\"js\": \"...\"}` script.\n\nMiniJinja treats undefined variables as errors, does not escape output, and\nadds a `json` filter that prints a value as indented JSON. A script sees the\ncontext as global variables and returns the value of its last statement.\nEach templated field states its context and the result it expects.",
       "anyOf": [
         {
           "anyOf": [

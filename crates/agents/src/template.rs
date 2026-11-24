@@ -12,7 +12,12 @@ use std::{
     time::{Duration, Instant},
 };
 
-/// MiniJinja text, or `{"js": "..."}`.
+/// A template: MiniJinja text, or a `{"js": "..."}` script.
+///
+/// MiniJinja treats undefined variables as errors, does not escape output, and
+/// adds a `json` filter that prints a value as indented JSON. A script sees the
+/// context as global variables and returns the value of its last statement.
+/// Each templated field states its context and the result it expects.
 #[derive(Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(untagged)]
 pub enum Template {
@@ -20,9 +25,12 @@ pub enum Template {
     Js(Script),
 }
 
-/// JavaScript run in QuickJS with no I/O. The template context is exposed as
-/// global variables; the value of the last statement is the result. Output hooks
-/// keep `globalThis` for the whole run; other scripts start from a fresh context.
+/// A script: `{"js": "..."}`, JavaScript run in QuickJS with no I/O and with
+/// memory, stack and time limits.
+///
+/// The context is exposed as global variables, and the value of the last
+/// statement is the result. Output hooks keep `globalThis` for the whole run;
+/// other scripts start from a fresh context.
 #[derive(Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Script {

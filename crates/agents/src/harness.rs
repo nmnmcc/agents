@@ -26,6 +26,10 @@ use std::{
 #[serde(deny_unknown_fields)]
 pub struct Harness {
     program: Program,
+    /// Arguments, rendered one by one without a shell.
+    ///
+    /// Template context: `program`, `agent`, `project_instructions`, `mcp`, `skills`, `paths`, `model`, `session`.
+    /// Result: a string; a script may also return an array of strings, or null for none.
     args: Vec<Template>,
     #[serde(default)]
     env: Env,
@@ -33,14 +37,21 @@ pub struct Harness {
     capabilities: Capabilities,
     #[serde(default)]
     files: BTreeMap<FileName, Artifact>,
-    /// Renders the harness input from `task`.
+    /// Standard input of the harness. Omit it to pass the task unchanged.
+    ///
+    /// Template context: `task`.
+    /// Result: a string.
     stdin: Option<Template>,
     #[serde(default)]
     hooks: Hooks,
 }
 
-/// Child-only environment overrides: a map whose `null` values remove inherited
-/// variables, or a script that returns such a map.
+/// Environment overrides for the harness and its hooks only: a map from
+/// variable name to a template, where null removes an inherited variable, or
+/// a script that returns such a map.
+///
+/// Template context: `program`, `agent`, `project_instructions`, `mcp`, `skills`, `paths`, `model`, `session`.
+/// Result: a string, or null to remove the variable.
 #[derive(Clone, Deserialize, JsonSchema)]
 #[serde(untagged)]
 enum Env {
@@ -106,16 +117,30 @@ impl Harness {
 #[serde(deny_unknown_fields)]
 struct Hooks {
     /// Commands run in order before the harness starts; any failure aborts the run.
+    /// Each is an argument list whose first element is the program, rendered like `args`.
+    ///
+    /// Template context: `program`, `agent`, `project_instructions`, `mcp`, `skills`, `paths`, `model`, `session`.
+    /// Result: as for `args`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     before: Vec<Vec<Template>>,
-    /// Commands run in order after the harness exits, with its exit code as
-    /// `status` (null if killed by a signal); any failure fails the run.
+    /// Commands run in order after the harness exits; any failure fails the run.
+    /// Each is an argument list whose first element is the program, rendered like `args`.
+    ///
+    /// Template context: `program`, `agent`, `project_instructions`, `mcp`, `skills`, `paths`, `model`, `session`, and `status`, the exit code (null if killed by a signal).
+    /// Result: as for `args`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     after: Vec<Vec<Template>>,
-    /// Script run on each line of harness stdout.
+    /// Runs on each line of harness stdout.
+    ///
+    /// Script context: `program`, `agent`, `project_instructions`, `mcp`, `skills`, `paths`, `model`, `session`, `stream` and `line`.
+    /// Result: null keeps the line, or an object whose `line` replaces it (null drops
+    /// it) and whose `session` reports a native session ID.
     #[serde(skip_serializing_if = "Option::is_none")]
     stdout: Option<Script>,
-    /// Script run on each line of harness stderr.
+    /// Runs on each line of harness stderr.
+    ///
+    /// Script context: `program`, `agent`, `project_instructions`, `mcp`, `skills`, `paths`, `model`, `session`, `stream` and `line`.
+    /// Result: as for `stdout`.
     #[serde(skip_serializing_if = "Option::is_none")]
     stderr: Option<Script>,
 }
@@ -183,7 +208,10 @@ enum Sessions {
 #[derive(Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct Artifact {
-    /// JavaScript may return any JSON value for a `json` file.
+    /// Contents of the generated file.
+    ///
+    /// Template context: `program`, `agent`, `project_instructions`, `mcp`, `skills`, `paths`, `model`, `session`.
+    /// Result: a string; a script may return any JSON value for a `json` file.
     template: Template,
     format: Format,
 }
