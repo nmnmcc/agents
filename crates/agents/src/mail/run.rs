@@ -6,10 +6,23 @@ use super::{
 use crate::{
     config::{AgentMailbox, MailRoutes, Mcp, Project},
     harness::Plan,
+    template::{Renderer, Template},
     types::{Id, Program},
 };
 use anyhow::{Context, Result, ensure};
+use serde_json::json;
+use std::sync::LazyLock;
 use std::{fs, io, path::Path, process::ExitStatus, time::Duration};
+
+/// The prompt used unless `mail.prompt` or `agents.<id>.mail.prompt` is set.
+pub const DEFAULT_PROMPT_TEXT: &str = "The new message in your inbox follows. Handle it as a \
+request from its sender within your role: use agents-mail to read its thread, reply when \
+appropriate, and mark the message read once handled.
+{{ mail | json }}
+";
+
+static DEFAULT_PROMPT: LazyLock<Template> =
+    LazyLock::new(|| Template::Text(DEFAULT_PROMPT_TEXT.to_owned()));
 
 /// Runs `project`'s agent on one message in its inbox.
 pub fn execute(
@@ -76,12 +89,13 @@ fn execute_in(
     let plan = Plan::render(&project, path, session.as_ref())?;
     let reported_id = plan.reports_session_id().then(SessionId::default);
     let mail = access.inbox()?.get(message)?;
-    let prompt = format!(
-        "The new message in your inbox follows. Handle it as a request from its \
-         sender within your role: use agents-mail to read its thread, reply when \
-         appropriate, and mark the message read once handled.\n{}\n",
-        serde_json::to_string_pretty(&mail)?
-    );
+    let prompt = Renderer::new(json!({
+        "agent": &project.agent,
+        "address": mailbox.address().to_string(),
+        "mail": mail,
+    }))?
+    .string(mailbox.prompt().unwrap_or(&DEFAULT_PROMPT))
+    .context("render mail prompt")?;
     let status = mcp::with_bridge(
         &socket,
         |request| match request {

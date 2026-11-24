@@ -30,6 +30,17 @@
             "$ref": "#/$defs/AgentSelector"
           }
         },
+        "prompt": {
+          "description": "Prompt template overriding the project default.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Template"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "to": {
           "type": [
             "array",
@@ -982,6 +993,32 @@
                         "pattern": "^(?:[^\\\\\\u0000]+:)?[a-z0-9_-]+$(?![\\s\\S])"
                       }
                     },
+                    "prompt": {
+                      "description": "Prompt template overriding the project default.",
+                      "anyOf": [
+                        {
+                          "description": "MiniJinja text, or `{\"js\": \"...\"}`.",
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "description": "JavaScript run in QuickJS with no I/O. The template context is exposed as\nglobal variables; the value of the last statement is the result. Output hooks\nkeep `globalThis` for the whole run; other scripts start from a fresh context.",
+                              "type": "object",
+                              "properties": {
+                                "js": {
+                                  "type": "string"
+                                }
+                              },
+                              "additionalProperties": false
+                            }
+                          ]
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
                     "to": {
                       "type": [
                         "array",
@@ -1460,6 +1497,52 @@
                   }
                 ]
               }
+            },
+            "prompt": {
+              "description": "Prompt given to an agent for each new message; see the README for its context.",
+              "anyOf": [
+                {
+                  "description": "MiniJinja text, or `{\"js\": \"...\"}`.",
+                  "anyOf": [
+                    {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "$ref": "#/$defs/EnvReference"
+                        },
+                        {
+                          "$ref": "#/$defs/FileReference"
+                        }
+                      ]
+                    },
+                    {
+                      "description": "JavaScript run in QuickJS with no I/O. The template context is exposed as\nglobal variables; the value of the last statement is the result. Output hooks\nkeep `globalThis` for the whole run; other scripts start from a fresh context.",
+                      "type": "object",
+                      "properties": {
+                        "js": {
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "$ref": "#/$defs/EnvReference"
+                            },
+                            {
+                              "$ref": "#/$defs/FileReference"
+                            }
+                          ]
+                        }
+                      },
+                      "additionalProperties": false
+                    }
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "to": {
               "description": "Limit outgoing mail to registered agents. Omission allows all agents.",
@@ -2281,6 +2364,17 @@
           "items": {
             "$ref": "#/$defs/AgentSelector"
           }
+        },
+        "prompt": {
+          "description": "Prompt given to an agent for each new message; see the README for its context.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Template"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "to": {
           "description": "Limit outgoing mail to registered agents. Omission allows all agents.",

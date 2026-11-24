@@ -649,10 +649,16 @@ def test(binary, imap_port):
                 keys[HUMAN],
             )
             append(imap_port, "build", follow_up)
-            assert cli(build, "--once").stdout.strip().split() == [
-                b"handled",
-                started[1],
-                b"resume",
+            # Each agent may render its own prompt from the message.
+            configuration = json.loads(build.read_text())
+            configuration["agents"]["edit"]["mail"]["prompt"] = (
+                "Custom prompt for {{ agent.id }} at {{ address }}: "
+                "{{ mail.message.subject }}\n{{ mail | json }}\n"
+            )
+            build.write_text(json.dumps(configuration))
+            assert cli(build, "--once").stdout.strip().splitlines() == [
+                f"prompt: Custom prompt for edit at {EDITOR}: Work".encode(),
+                b"handled " + started[1] + b" resume",
             ]
 
             sent_count = len(smtp.sent)

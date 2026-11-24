@@ -52,6 +52,18 @@ A run, including any processes the harness started, is killed after
 `agents.<id>.timeout` seconds (default 3600; set it for every agent in
 `agents.default`). `after` hooks still run, with a null `status`.
 
+The agent receives the new message as a prompt on standard input. Customize
+it with a template in `mail.prompt`, or per agent in `agents.<id>.mail.prompt`:
+MiniJinja text or `{"js": "..."}` like other templates. The context has
+`agent` (`id`, `description`, `instructions`), `address` (the agent's mail
+address) and `mail` (the message as `agents mail get` prints it). The
+`json` filter prints a value as indented JSON. The default is:
+
+```jinja
+The new message in your inbox follows. Handle it as a request from its sender within your role: use agents-mail to read its thread, reply when appropriate, and mark the message read once handled.
+{{ mail | json }}
+```
+
 The service reloads the project configuration when its files change,
 including `.agents.d/` layers, referenced files, and the projects in a
 `mail.workspace`. Runs already in progress finish with the configuration
